@@ -20,7 +20,9 @@ int main() {
             if (re.status == false) {
                 std::cout << "Error: " << re.message << std::endl;
             }else{
-                std::cout << re.message << std::endl;
+                if (re.message != "") {
+                    std::cout << re.message << std::endl;
+                }
             }
         }
     }
