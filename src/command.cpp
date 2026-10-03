@@ -93,6 +93,7 @@ Result cmd_delete(const Args& args) {
             return {false, e.what()};
         }
         return {true, "deleted successfully"};
+        res_statu = {false, false, false, false, {}};
     }else{
         return {false, "Repository not initialized"};
     }
