@@ -1,20 +1,18 @@
 #include <iostream>
 #include <string>
+#include <vector>
+#include <cstdint>
 #include "command.h"
 #include "main.h"
+#include "types.h"
 
 #define VER "0.1"
-struct Status {
-    bool isfind;
-    bool iscomplete;
-    std::string key;
-};
-
 
 
 int main(int argc, char* argv[]) {
     std::string input;
-    cmd_prepare({});
+    Args args(argv + 1, argv + argc);
+    cmd_prepare(args);
     while (true) {
         std::cout << "BlockStorage> ";
         std::getline(std::cin, input);
