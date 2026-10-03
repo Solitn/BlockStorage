@@ -16,7 +16,7 @@ inline std::vector<uint8_t> read_file(const std::string& path) {
     );
 }
 
-Status res_statu;
+extern Status res_statu;
 
 inline std::vector<std::string> split(const std::string& line) {
     std::vector<std::string> tokens;

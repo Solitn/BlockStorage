@@ -3,8 +3,10 @@
 #include <vector>
 #include "main.h"
 #include "types.h"
-void cmd_prepare(const std::vector<std::string>& args);
-Result cmd_delete(const std::vector<std::string>& args);
-Result cmd_help(const std::vector<std::string>& args);
-Result cmd_init(const std::vector<std::string>& args);
+void cmd_prepare(const Args& args);
+Result cmd_statu(const Args& args);
+Result cmd_load(const Args& args);
+Result cmd_delete(const Args& args);
+Result cmd_help(const Args& args);
+Result cmd_init(const Args& args);
 Result command(const std::string& input);

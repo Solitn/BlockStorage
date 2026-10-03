@@ -4,7 +4,7 @@
 #include <cstdint>
 
 using Args = std::vector<std::string>;
-
+using U8list = std::vector<uint8_t>;
 struct Result {
     bool status;
     std::string message;
@@ -20,6 +20,6 @@ struct Status {
     bool iscomplete;
     bool haskey;
     bool hasload;
-    std::vector<uint8_t> key;
+    U8list key;
 };
 

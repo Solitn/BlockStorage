@@ -8,6 +8,7 @@
 
 #define VER "0.1"
 
+Status res_statu;
 
 int main(int argc, char* argv[]) {
     std::string input;
