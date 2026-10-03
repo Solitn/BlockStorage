@@ -43,6 +43,7 @@ void cmd_prepare(const Args& args){
             res_statu.hasload = true;
         } else {
             res_statu.haskey = true;
+            res_statu.key = files;
         }
     }else{
         std::cout << "Repository not found" << std::endl;
