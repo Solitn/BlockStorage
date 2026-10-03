@@ -4,11 +4,17 @@
 #include "main.h"
 
 #define VER "0.1"
+struct Status {
+    bool isfind;
+    bool iscomplete;
+    std::string key;
+};
 
-int main() {
+
+
+int main(int argc, char* argv[]) {
     std::string input;
-    std::cout << "BlockStorage v" << VER << std::endl;
-    std::cout << "BlockStorage,made by @solitn" << std::endl<<"Github: https://github.com/solitn/blockstorage" << std::endl;
+    cmd_prepare({});
     while (true) {
         std::cout << "BlockStorage> ";
         std::getline(std::cin, input);

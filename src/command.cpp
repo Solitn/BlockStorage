@@ -6,12 +6,26 @@
 #include "command.h"
 #include "types.h"
 #include "files.h"
-
+const std::string VER = "0.1";
 const std::map<std::string, CommandEntry> COMMANDS = {
     {"init",   {cmd_init,   "Initialize a new repository,add -pxxxxxxx could set a password for the repository"}},
     {"help",   {cmd_help,   "Show this help message"}},
     {"delete", {cmd_delete, "Delete a file from the repository"}}
 };
+
+void cmd_prepare(const Args& args){
+    std::cout << "BlockStorage v" << VER << std::endl;
+    std::cout << "BlockStorage,made by @solitn" << std::endl<<"Github: https://github.com/solitn/blockstorage" << std::endl;
+    if(check_dir()){
+        if(fs::exists(".block/idx") && fs::exists(".block/key") && fs::exists(".block/data.blk") && fs::exists(".block/bitmap") && fs::exists(".block/bitmap.small")){
+            std::cout << "Repository found" << std::endl;
+        } else {
+            std::cout << "Repository found, but some files are missing" << std::endl;
+        }
+    }else{
+        std::cout << "Repository not found" << std::endl;
+    }
+}
 
 Result cmd_delete(const Args& args) {
     if (check_dir()){
