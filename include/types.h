@@ -20,6 +20,8 @@ struct Status {
     bool iscomplete;
     bool haskey;
     bool hasload;
+    U8list key_sha256;
     U8list key;
+    U8list salt;
 };
 

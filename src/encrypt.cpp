@@ -7,7 +7,11 @@
 #include <vector>
 #include "encrypt.h"
 #include "types.h"
-
+U8list To32(const U8list& in) {
+    U8list out(in.begin(), in.begin() + std::min<size_t>(in.size(), 32));
+    out.resize(32, 0);
+    return out;
+}
 std::string Base64Encode(const std::vector<uint8_t>& data) {
     if (data.empty()) return {};
 

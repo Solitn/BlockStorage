@@ -15,7 +15,7 @@ const std::map<std::string, CommandEntry> COMMANDS = {
     {"init",   {cmd_init,   "Initialize a new repository,add -p<password> could set a password for the repository"}},
     {"help",   {cmd_help,   "Show this help message"}},
     {"delete", {cmd_delete, "Delete the repository"}},
-    //{"load",   {cmd_load,   "Load the repository,add -p<password> could unlock the repository"}},
+    {"load",   {cmd_load,   "Load the repository,add -p<password> could unlock the repository"}},
     {"statu",  {cmd_statu,  "Show the current status of the repository"}}
 };
 
@@ -30,11 +30,14 @@ Result getStatu(const Args& args) {
         try{
             U8list files = read_file(".block/key");
             if (files.empty()) {
-                res_statu.key.clear();
+                res_statu.key_sha256.clear();
                 res_statu.haskey = false;
+                res_statu.salt.clear();
+                res_statu.hasload = true;
             } else {
                 res_statu.haskey = true;
-                res_statu.key = files;
+                res_statu.key_sha256.assign(files.begin() + 32, files.end());
+                res_statu.salt.assign(files.begin(), files.begin() + 32);;
             }
         } catch (std::exception& e) {
             res_statu.haskey = false;
@@ -47,6 +50,8 @@ Result getStatu(const Args& args) {
             false,
             false,
             false,
+            {},
+            {},
             {}
         };
 
@@ -61,6 +66,8 @@ void cmd_prepare(const Args& args){
         false,
         false,
         false,
+        {},//key_sha256
+        {},//key
         {}
     };
     std::cout << "BlockStorage v" << VER << std::endl;
@@ -102,9 +109,10 @@ Result cmd_statu(const Args& args){
     std::cout << "iscomplete : " << (res_statu.iscomplete ? "true" : "false") << "\n";
     std::cout << "haskey     : " << (res_statu.haskey     ? "true" : "false") << "\n";
     std::cout << "hasload    : " << (res_statu.hasload    ? "true" : "false") << "\n";
-    std::cout << "key size   : " << res_statu.key.size() << "\n";
-    if (!res_statu.key.empty()) {
-        std::cout << "key (b64)  : " << Base64Encode(res_statu.key) << "\n";
+    if (!res_statu.key_sha256.empty()) {
+        std::cout << "key (sha256)  : " << Base64Encode(res_statu.key_sha256) << "\n";
+        std::cout << "salt : " << Base64Encode(res_statu.salt) << "\n";
+        std::cout << "key   : " << Base64Encode(res_statu.key) << "\n";
     }
     return {true, ""};
 }
@@ -131,7 +139,43 @@ Result cmd_help(const Args& args) {
     return {true, ""};
 }
 
+Result cmd_load(const Args& args) {
+    getStatu({});
+    if (!res_statu.iscomplete) {
+        return {false, "Cannot load repository: repository is incomplete or missing"};
+    }
+    if (!res_statu.haskey){
+        return {false, "Cannot load repository: no key provided"};
+    }
+    if (res_statu.hasload){
+        return {false, "Repository already loaded"};
+    }
+    if (args[1].substr(0, 2) == "-p"){
+        std::string input_password = args[1].substr(2);
+        U8list u8_password = U8list(input_password.begin(), input_password.end());
+        U8list u8_salt = res_statu.salt;
+        U8list u8_pass_sha256 = res_statu.key_sha256;
+        U8list u8_key = u8_password;
+        u8_key.insert(u8_key.end(), u8_salt.begin(), u8_salt.end());
+        U8list u8_final = SlowHash(u8_key);
+        if (Sha256(u8_final) != u8_pass_sha256){
+            return {false, "Incorrect password"};
+        }else{
+            res_statu.hasload = true;
+            res_statu.key = u8_final;
+            return {true, "Loaded repository"};
+        }
+    }else{
+        return {false, "Incorrect arguments"};
+    }
+}
+
 Result cmd_init(const Args& args) {
+    /*
+    password----->slowhash----->sha256----->final key
+            salt
+    salt+final key----->file
+    */
     getStatu({});
     std::string input_password = "";
     std::string salt = "";
@@ -163,6 +207,8 @@ Result cmd_init(const Args& args) {
                 if (s.substr(0, 2) == "-s") {
                     salt = s.substr(2);
                     u8_salt_bytes = U8list(salt.begin(), salt.end());
+                    U8list a = u8_salt_bytes;
+                    u8_salt_bytes = To32(a);
                 }
             }
             if (input_password.empty() && salt.empty()) {
@@ -183,8 +229,10 @@ Result cmd_init(const Args& args) {
                 std::cout << "Derived salt: ";
                 std::cout << Base64Encode(u8_salt_bytes) << std::endl;
                 std::ofstream key_file(".block/key", std::ios::binary);
+                res_statu.key = derived_key;
+                res_statu.hasload = true;
                 U8list u8_keyfile_bytes = u8_salt_bytes;
-                u8_keyfile_bytes.insert(u8_keyfile_bytes.end(), derived_key.begin(), derived_key.end());//add salt and sha256 to key file
+                u8_keyfile_bytes.insert(u8_keyfile_bytes.end(), sha256_key.begin(), sha256_key.end());//add salt and sha256 to key file
                 key_file.write(reinterpret_cast<const char*>(u8_keyfile_bytes.data()), u8_keyfile_bytes.size());
                 if(!key_file.is_open()){
                     return {false, "Failed to write key file"};
