@@ -10,3 +10,4 @@ Result cmd_delete(const Args& args);
 Result cmd_help(const Args& args);
 Result cmd_init(const Args& args);
 Result command(const std::string& input);
+std::vector<std::string> SplitCommandLine(const std::string& cmd);

@@ -6,16 +6,54 @@
 #include "command.h"
 #include "types.h"
 #include "main.h"
-#include "encrypt.h"
 #include "files.h"
+#include "encrypt.h"
+
+
 const std::string VER = "0.1";
 const std::map<std::string, CommandEntry> COMMANDS = {
     {"init",   {cmd_init,   "Initialize a new repository,add -p<password> could set a password for the repository"}},
     {"help",   {cmd_help,   "Show this help message"}},
-    {"delete", {cmd_delete, "Delete a file from the repository"}},
-    {"load",   {cmd_load,   "Load the repository,add -p<password> could unlock the repository"}},
+    {"delete", {cmd_delete, "Delete the repository"}},
+    //{"load",   {cmd_load,   "Load the repository,add -p<password> could unlock the repository"}},
     {"statu",  {cmd_statu,  "Show the current status of the repository"}}
 };
+
+Result getStatu(const Args& args) {
+    if (fs::is_directory(".block")) {
+        res_statu.isfind = true;
+        if (fs::exists(".block/idx") && fs::exists(".block/key") && fs::exists(".block/data.blk") && fs::exists(".block/bitmap") && fs::exists(".block/bitmap.small")) {
+            res_statu.iscomplete = true;
+        } else {
+            res_statu.iscomplete = false;
+        }
+        try{
+            U8list files = read_file(".block/key");
+            if (files.empty()) {
+                res_statu.key.clear();
+                res_statu.haskey = false;
+            } else {
+                res_statu.haskey = true;
+                res_statu.key = files;
+            }
+        } catch (std::exception& e) {
+            res_statu.haskey = false;
+            res_statu.hasload = false;
+        }
+    }
+    else {
+        res_statu={
+            false,
+            false,
+            false,
+            false,
+            {}
+        };
+
+    }
+    return {true, ""};
+}
+
 
 void cmd_prepare(const Args& args){
     res_statu={
@@ -27,63 +65,48 @@ void cmd_prepare(const Args& args){
     };
     std::cout << "BlockStorage v" << VER << std::endl;
     std::cout << "BlockStorage,made by @solitn" << std::endl<<"Github: https://github.com/solitn/blockstorage" << std::endl;
-    if(check_dir()){
-        if(fs::exists(".block/idx") && fs::exists(".block/key") && fs::exists(".block/data.blk") && fs::exists(".block/bitmap") && fs::exists(".block/bitmap.small")){
+    getStatu({});
+    if (res_statu.isfind) {
+        if (res_statu.iscomplete) {
             std::cout << "Repository found" << std::endl;
-            res_statu.iscomplete = true;
-        } else {
+        }else {
             std::cout << "Repository found, but some files are missing" << std::endl;
-            res_statu.iscomplete = false;
         }
-        res_statu.isfind = true;
-        U8list files = read_file(".block/key");
-        if(files.size() == 0){
-            res_statu.key = {};
-            res_statu.haskey = false;
-            res_statu.hasload = true;
-        } else {
-            res_statu.haskey = true;
-            res_statu.key = files;
-        }
-    }else{
+    }else {
         std::cout << "Repository not found" << std::endl;
     }
 }
+
+Result command(const std::string& input) {
+    Args args = SplitCommandLine(input);
+    if (args.empty()) {
+        return {
+            false,
+            "No command given"
+        };
+    }
+    auto it = COMMANDS.find(args[0]);
+    if (it != COMMANDS.end()) {
+        return it->second.fn(args);
+    } else {
+        return {
+            false,
+            "Unknown command: " + args[0]
+        };
+    }
+}
+
 Result cmd_statu(const Args& args){
+    getStatu({});
     std::cout << "isfind     : " << (res_statu.isfind     ? "true" : "false") << "\n";
     std::cout << "iscomplete : " << (res_statu.iscomplete ? "true" : "false") << "\n";
     std::cout << "haskey     : " << (res_statu.haskey     ? "true" : "false") << "\n";
     std::cout << "hasload    : " << (res_statu.hasload    ? "true" : "false") << "\n";
     std::cout << "key size   : " << res_statu.key.size() << "\n";
     if (!res_statu.key.empty()) {
-        std::cout << "key (b64)  : " << encrypt::encode(res_statu.key) << "\n";
+        std::cout << "key (b64)  : " << Base64Encode(res_statu.key) << "\n";
     }
     return {true, ""};
-}
-Result cmd_load(const Args& args){
-    if (res_statu.iscomplete){
-        if(!res_statu.haskey){
-            return {true, "Repository loaded"};
-        }else{
-            if (args.size() > 1 && args[1].substr(0, 2) == "-p") {
-                std::string inputpassword = args[1].substr(2);
-                U8list pass;
-                U8list data = read_file(".block/key");
-                U8list salt(data.begin(), data.begin() + 32);
-                U8list password = U8list(inputpassword.begin(), inputpassword.end());
-                password.insert(password.begin(),salt.begin(),salt.end());
-                U8list key = encrypt::encrypt_string(password,password);
-                U8list shakey = encrypt::sha256(key);
-                if (shakey == U8list(data.begin() + 32, data.end())){
-                    return {true, "Repository loaded,the password is correct"};
-                }else{
-                    return {false, "Repository loaded,but the password is incorrect"};
-                }
-            }
-        }
-    }else{
-        return {false, "Repository not complete"};
-    }
 }
 
 Result cmd_delete(const Args& args) {
@@ -109,82 +132,134 @@ Result cmd_help(const Args& args) {
 }
 
 Result cmd_init(const Args& args) {
-    if (check_dir()) {
-        return {
-            false,
-            "Repository already initialized"
-        };
-    }
-    U8list salt(32);
-    try {
-        if (args.size() > 1 && args[1].substr(0, 2) == "-p") {
-            std::string inputpassword = args[1].substr(2);
-            res_statu.isfind = true;
-            U8list pass;
-            U8list password(inputpassword.begin(), inputpassword.end());
-            password.insert(password.begin(),salt.begin(),salt.end());
-            pass = encrypt::encrypt_string(U8list(password.begin(), password.end()), U8list(password.begin(), password.end()));
-            res_statu.key = pass;
-        }
-        fs::create_directory(".block");
-        std::ofstream(".block/idx").close();
-        std::ofstream(".block/key").close();
-        std::ofstream(".block/data.blk").close();
-        std::ofstream(".block/bitmap").close();
-        std::ofstream(".block/bitmap.small").close();
-        std::ofstream io(".block/key", std::ios::binary | std::ios::app);
-        if(res_statu.key.size() > 0) {
-            for (auto& b : salt) b = encrypt::random_byte();
-            io.write(reinterpret_cast<const char*>(salt.data()), salt.size());
-            U8list shakey = encrypt::sha256(res_statu.key);
-            io.write(reinterpret_cast<const char*>(shakey.data()), shakey.size());
-        }
-        if(!io) {
-            return {
-                false,
-                "Failed to write to .block/key"
+    getStatu({});
+    std::string input_password = "";
+    std::string salt = "";
+    U8list u8_pass_bytes = {};
+    U8list u8_salt_bytes = {};
+    if(res_statu.isfind){
+        return {false, "Repository already exists"};
+    }else{
+        try{
+            fs::create_directory(".block");
+            const char* files[] = {
+                ".block/idx",
+                ".block/key",
+                ".block/data.blk",
+                ".block/bitmap",
+                ".block/bitmap.small"
             };
+            for (const char* f : files) {
+                if (!fs::exists(f)) {
+                    std::ofstream ofs(f, std::ios::binary);  // 创建空文件
+                    ofs.close();
+                }
+            }
+            for (auto s:args){
+                if (s.substr(0, 2) == "-p") {
+                    input_password = s.substr(2);
+                    u8_pass_bytes = U8list(input_password.begin(), input_password.end());
+                }
+                if (s.substr(0, 2) == "-s") {
+                    salt = s.substr(2);
+                    u8_salt_bytes = U8list(salt.begin(), salt.end());
+                }
+            }
+            if (input_password.empty() && salt.empty()) {
+                return {true, "Repository initialized successfully"};
+            }else{  //add key
+                if (salt.empty()) {
+                    std::cout << "No salt provided, generating random salt..." << std::endl;
+                    u8_salt_bytes = RandomBytes(32);
+                }
+                U8list u8_final_bytes = u8_pass_bytes;
+                u8_final_bytes.insert(u8_final_bytes.end(), u8_salt_bytes.begin(), u8_salt_bytes.end());//add salt to password
+                U8list derived_key = SlowHash(u8_final_bytes);// slow hash pass+salt
+                U8list sha256_key = Sha256(derived_key);   // sha256 slow hash pass+salt
+                std::cout << "Derived key (SHA256): ";
+                std::cout << Base64Encode(sha256_key) << std::endl;
+                std::cout << "Final key: ";
+                std::cout << Base64Encode(derived_key) << std::endl;
+                std::cout << "Derived salt: ";
+                std::cout << Base64Encode(u8_salt_bytes) << std::endl;
+                std::ofstream key_file(".block/key", std::ios::binary);
+                U8list u8_keyfile_bytes = u8_salt_bytes;
+                u8_keyfile_bytes.insert(u8_keyfile_bytes.end(), derived_key.begin(), derived_key.end());//add salt and sha256 to key file
+                key_file.write(reinterpret_cast<const char*>(u8_keyfile_bytes.data()), u8_keyfile_bytes.size());
+                if(!key_file.is_open()){
+                    return {false, "Failed to write key file"};
+                }
+                key_file.close();
+            }
+            return {true, "Repository initialized successfully"};
+        }catch (const fs::filesystem_error& e){
+            return {false, e.what()};
         }
-        io.close();
-        res_statu.isfind = true;
-        res_statu.iscomplete = true;
-        if(res_statu.key.size() > 0) {
-            std::string msg = "Repository initialized, password set successfully , key's base64 is ";
-            res_statu.haskey = true;
-            return {
-                true,
-                msg+=encrypt::encode(res_statu.key)
-            };
-        }else{
-            res_statu.haskey = false;
-            return {
-                true,
-                "Repository initialized, no password set"
-            };
-        }
-    } catch (const std::exception&) {
-        return {
-            false,
-            "Failed to initialize repository"
-        };
     }
 }
 
-Result command(const std::string& input) {
-    Args args = split(input);
-    if (args.empty()) {
-        return {
-            false,
-            "No command given"
-        };
+std::vector<std::string> SplitCommandLine(const std::string& cmd) {
+    std::vector<std::string> args;
+    std::string cur;
+    bool inQuotes = false;   // 是否处于引号内
+    bool hasContent = false; // 当前参数是否已开始（用于识别空参数 ""）
+    size_t i = 0, n = cmd.size();
+
+    while (i < n) {
+        char c = cmd[i];
+
+        // 处理连续反斜杠
+        if (c == '\\') {
+            size_t start = i;
+            while (i < n && cmd[i] == '\\') ++i;
+            size_t cnt = i - start;
+
+            if (i < n && cmd[i] == '"') {
+                cur.append(cnt / 2, '\\');      // 每两个 \ 还原成一个
+                if (cnt % 2 == 0) {
+                    inQuotes = !inQuotes;       // 偶数个：引号起作用
+                    hasContent = true;
+                    ++i;
+                } else {
+                    cur.push_back('"');         // 奇数个：引号是字面量
+                    hasContent = true;
+                    ++i;
+                }
+            } else {
+                cur.append(cnt, '\\');          // 后面不是引号，原样保留
+                hasContent = true;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            if (inQuotes && i + 1 < n && cmd[i + 1] == '"') {
+                cur.push_back('"');             // 引号内的 "" -> 一个 "
+                i += 2;
+            } else {
+                inQuotes = !inQuotes;           // 切换引号状态
+                ++i;
+            }
+            hasContent = true;
+            continue;
+        }
+
+        if (!inQuotes && (c == ' ' || c == '\t')) {
+            if (hasContent) {
+                args.push_back(cur);
+                cur.clear();
+                hasContent = false;
+            }
+            ++i;
+            continue;
+        }
+
+        cur.push_back(c);
+        hasContent = true;
+        ++i;
     }
-    auto it = COMMANDS.find(args[0]);
-    if (it != COMMANDS.end()) {
-        return it->second.fn(args);
-    } else {
-        return {
-            false,
-            "Unknown command: " + args[0]
-        };
-    }
+
+    if (hasContent) args.push_back(cur);
+    return args;
 }
+
