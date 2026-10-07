@@ -4,12 +4,13 @@
 #include <cctype>
 #include <fstream>
 #include "types.h"
+#include "json.h"
 #include <iterator>
-
+using json = nlohmann::json;
 inline std::vector<uint8_t> read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
-
+    in.close();
     return std::vector<uint8_t>(
         std::istreambuf_iterator<char>(in),
         std::istreambuf_iterator<char>()
@@ -17,7 +18,7 @@ inline std::vector<uint8_t> read_file(const std::string& path) {
 }
 
 extern Status res_statu;
-
+extern json files;
 inline std::vector<std::string> split(const std::string& line) {
     std::vector<std::string> tokens;
     std::string token;

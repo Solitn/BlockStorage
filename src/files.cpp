@@ -1,12 +1,13 @@
 #include "files.h"
 #include "types.h"
 #include "main.h"
+#include "encrypt.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include "json.h"
-
+using json = nlohmann::json;
 bool check_dir() {
     fs::path dir = ".block";
     if (fs::exists(dir)) {
@@ -16,6 +17,21 @@ bool check_dir() {
     }
 }
 
+bool load_json(U8list key){
+    U8list json_bytes_data = read_file(".block/idx");
+    files = decrypt_json(json_bytes_data, key);
+    if(files.is_null()){
+        return false;
+    }
+    return true;
+}
+bool save_json(U8list key){
+    U8list json_bytes_data = encrypt_json(files, key);
+    std::ofstream out(".block/idx", std::ios::binary);
+    out.write((char*)json_bytes_data.data(), json_bytes_data.size());
+    out.close();
+    return true;
+}
 Result add_file(std::string in_file_name /*内部名称*/ , std::string out_file_name ,U8list key) {
     bool haskey = false;
     if (key.size()==32){
@@ -27,6 +43,7 @@ Result add_file(std::string in_file_name /*内部名称*/ , std::string out_file
             0x8E, 0xD4, 0x27, 0x63, 0xFA, 0x08, 0xB1, 0x4D
         };
     }
-    read_file(".block/file.json");
+    U8list json_bytes_data = read_file(".block/file.json");
+
     return {true , ""};
 }

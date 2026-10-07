@@ -8,3 +8,7 @@ std::string Base64Encode(const std::vector<uint8_t>& data);
 U8list SlowHash(const U8list& data);
 U8list Sha256(const U8list& data);
 U8list RandomBytes(size_t n);
+nlohmann::json decrypt_json(const std::vector<uint8_t>& data,
+                            const std::vector<uint8_t>& key);
+U8list encrypt_json(const nlohmann::json& j,
+                                const std::vector<uint8_t>& key);

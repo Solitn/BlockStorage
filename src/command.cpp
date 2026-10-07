@@ -8,7 +8,7 @@
 #include "main.h"
 #include "files.h"
 #include "encrypt.h"
-
+#include "json.h"
 
 const std::string VER = "0.1";
 const std::map<std::string, CommandEntry> COMMANDS = {

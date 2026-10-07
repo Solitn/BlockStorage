@@ -9,7 +9,7 @@
 #define VER "0.1"
 
 Status res_statu;
-
+json files;
 int main(int argc, char* argv[]) {
     std::string input;
     Args args(argv + 1, argv + argc);
