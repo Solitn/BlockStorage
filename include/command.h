@@ -5,6 +5,7 @@
 #include "types.h"
 void cmd_prepare(const Args& args);
 Result cmd_statu(const Args& args);
+Result getStatu(const Args& args);
 Result cmd_load(const Args& args);
 Result cmd_delete(const Args& args);
 Result cmd_help(const Args& args);

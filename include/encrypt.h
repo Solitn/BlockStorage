@@ -1,5 +1,7 @@
+#pragma once
 #include <string>
 #include <vector>
+#include "json.h"
 #include "types.h"
 U8list To32(const U8list& in);
 std::string Base64Encode(const std::vector<uint8_t>& data);

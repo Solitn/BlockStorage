@@ -19,10 +19,23 @@ const std::map<std::string, CommandEntry> COMMANDS = {
     {"statu",  {cmd_statu,  "Show the current status of the repository"}}
 };
 
+Result AddFile(const Args& args) {
+    if(args.size()<3){
+        return {false, "Invalid arguments"};
+    }
+    std::string infilename = args[1];
+    std::string outfilename = args[2];
+    getStatu({});
+    if (!res_statu.hasload) {
+        return {false, "Repository is not loaded"};
+    }
+
+}
+
 Result getStatu(const Args& args) {
     if (fs::is_directory(".block")) {
         res_statu.isfind = true;
-        if (fs::exists(".block/idx") && fs::exists(".block/key") && fs::exists(".block/data.blk") && fs::exists(".block/bitmap") && fs::exists(".block/bitmap.small")) {
+        if (fs::exists(".block/idx") && fs::exists(".block/key") && fs::exists(".block/data.blk") && fs::exists(".block/bitmap") &&fs::exists(".block/data.small")&& fs::exists(".block/bitmap.small")) {
             res_statu.iscomplete = true;
         } else {
             res_statu.iscomplete = false;
@@ -190,6 +203,7 @@ Result cmd_init(const Args& args) {
                 ".block/idx",
                 ".block/key",
                 ".block/data.blk",
+                ".block/data.small",
                 ".block/bitmap",
                 ".block/bitmap.small"
             };
