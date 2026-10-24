@@ -27,6 +27,7 @@ add_executable(BlockStorage
     src/files.cpp
     src/encrypt.cpp
     src/store.cpp
+    src/config.cpp
 )
 
 target_link_libraries(BlockStorage PRIVATE OpenSSL::Crypto)

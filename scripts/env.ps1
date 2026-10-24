@@ -76,7 +76,15 @@ $env:PATH = (($pathParts + $env:PATH) -join ';')
 $env:CC  = 'cl'
 $env:CXX = 'cl'
 
+# BlockStorage 默认导出根目录（程序未设置时的默认值是 C:\BlockStorage\extract）
+# 这里指向仓库内的 out\extract，便于开发/测试时不污染系统盘
+if (-not $env:BLOCKSTORAGE_OUT) {
+    $script:OutRoot = Join-Path $script:RepoRoot 'out\extract'
+    $env:BLOCKSTORAGE_OUT = $script:OutRoot
+}
+
 Write-Host "MSVC    : $(if ($msvc) { $msvc.FullName } else { '<missing>' })" -ForegroundColor DarkGray
 Write-Host "SDK     : $(if ($sdkVer) { $sdkVer.FullName } else { '<missing>' })" -ForegroundColor DarkGray
 Write-Host "OpenSSL : $openssl" -ForegroundColor DarkGray
 Write-Host "CMake   : $(Join-Path $cmakeBin 'cmake.exe')" -ForegroundColor DarkGray
+Write-Host "BS out  : $env:BLOCKSTORAGE_OUT" -ForegroundColor DarkGray

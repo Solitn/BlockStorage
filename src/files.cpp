@@ -1,13 +1,16 @@
 #include "files.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "config.h"
 #include "encrypt.h"
 #include "main.h"
 #include "store.h"
@@ -31,7 +34,7 @@ const U8list kDefaultKey = {
 
 json empty_index() {
     json j;
-    j["version"] = 1;
+    j["version"] = 2;
     j["files"] = json::object();
     return j;
 }
@@ -39,6 +42,9 @@ json empty_index() {
 json& index_root() {
     if (!files.is_object() || !files.contains("files") || !files["files"].is_object()) {
         files = empty_index();
+    }
+    if (!files.contains("version") || files["version"].get<int>() < 2) {
+        files["version"] = 2;
     }
     return files["files"];
 }
@@ -60,7 +66,54 @@ std::uint64_t next_id(const std::string& data_path, std::size_t rec_size,
     return std::max(store::record_count(data_path, rec_size), hint);
 }
 
+// 把内部路径拆成段；"/" 返回空 vector
+std::vector<std::string> split_path(const std::string& path) {
+    std::vector<std::string> segs;
+    std::string cur;
+    for (char c : path) {
+        if (c == '/') {
+            if (!cur.empty()) {
+                segs.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) segs.push_back(cur);
+    return segs;
+}
+
+std::string join_path(const std::vector<std::string>& segs, std::size_t begin) {
+    std::string out;
+    for (std::size_t i = begin; i < segs.size(); ++i) {
+        out += '/';
+        out += segs[i];
+    }
+    return out;
+}
+
+// 内部路径 -> 本地文件系统路径
+fs::path to_fs_path(const std::string& root, const std::string& internal) {
+    fs::path p(root);
+    for (const std::string& seg : split_path(internal)) p /= seg;
+    return p;
+}
+
+bool parent_dirs_ok(const fs::path& p, std::string& err) {
+    if (!p.has_parent_path()) return true;
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    if (ec && !fs::is_directory(p.parent_path())) {
+        err = ec.message();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------- 基础
 
 U8list RepoKey(const U8list& key) {
     return key.size() == 32 ? key : kDefaultKey;
@@ -68,6 +121,33 @@ U8list RepoKey(const U8list& key) {
 
 bool check_dir() {
     return store::path_exists(store::layout().dir);
+}
+
+std::string NormalizeInternalPath(const std::string& raw) {
+    std::string s;
+    s.reserve(raw.size() + 1);
+    for (char c : raw) s.push_back(c == '\\' ? '/' : c);
+
+    std::vector<std::string> segs;
+    std::string cur;
+    for (char c : s) {
+        if (c == '/') {
+            if (!cur.empty()) {
+                segs.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) segs.push_back(cur);
+
+    for (const std::string& seg : segs) {
+        if (seg == "." || seg == "..") return {};
+        if (seg.find(':') != std::string::npos) return {};  // 拒绝盘符
+    }
+    if (segs.empty()) return "/";
+    return join_path(segs, 0);
 }
 
 bool load_index(const U8list& key) {
@@ -81,6 +161,16 @@ bool load_index(const U8list& key) {
     if (j.is_null() || !j.is_object() || !j.contains("files") || !j["files"].is_object()) {
         return false;
     }
+
+    // v1（扁平名字）-> v2（内部路径）
+    json migrated = json::object();
+    for (auto it = j["files"].begin(); it != j["files"].end(); ++it) {
+        std::string name = it.key();
+        if (name.empty() || name[0] != '/') name = "/" + name;
+        migrated[name] = it.value();
+    }
+    j["files"] = migrated;
+    j["version"] = 2;
     files = j;
     return true;
 }
@@ -92,7 +182,9 @@ bool save_index(const U8list& key) {
     return write_all(store::layout().index, raw);
 }
 
-Result add_file(const std::string& src, const std::string& name_in, const U8list& key) {
+// ---------------------------------------------------------------- 写入
+
+Result add_file(const std::string& src, const std::string& internal_in, const U8list& key) {
     if (!check_dir()) return {false, "Repository not initialized"};
 
     std::error_code ec;
@@ -105,15 +197,24 @@ Result add_file(const std::string& src, const std::string& name_in, const U8list
     U8list plain = read_file(src);
     if (plain.size() != src_size) return {false, "Cannot read source file"};
 
-    std::string name = name_in;
-    if (name.empty()) name = fs::path(src).filename().string();
-    if (name.empty() || name.find('/') != std::string::npos ||
-        name.find('\\') != std::string::npos) {
-        return {false, "Invalid repository file name"};
+    // 以 '/' 结尾表示"放进这个目录"
+    const bool as_dir = !internal_in.empty() &&
+                        (internal_in.back() == '/' || internal_in.back() == '\\');
+    std::string name;
+    if (internal_in.empty()) {
+        name = NormalizeInternalPath(fs::path(src).filename().string());
+    } else if (as_dir) {
+        std::string base = NormalizeInternalPath(internal_in);
+        if (base.empty()) return {false, "Invalid internal path"};
+        name = (base == "/" ? "" : base) + "/" + fs::path(src).filename().string();
+    } else {
+        name = NormalizeInternalPath(internal_in);
     }
+    if (name.empty()) return {false, "Invalid internal path"};
+    if (name == "/") return {false, "Internal path must not be the repository root"};
 
     json& idx = index_root();
-    if (idx.contains(name)) return {false, "File already exists in repository: " + name};
+    if (idx.contains(name)) return {false, "Path already exists in repository: " + name};
 
     const store::Layout& L = store::layout();
     const U8list master = RepoKey(key);
@@ -208,18 +309,69 @@ Result add_file(const std::string& src, const std::string& name_in, const U8list
                       std::to_string(nblocks) + " blocks)"};
 }
 
-Result get_file(const std::string& name, const std::string& dst_in, const U8list& key) {
+Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
+                const U8list& key, int& added, int& failed) {
+    added = 0;
+    failed = 0;
     if (!check_dir()) return {false, "Repository not initialized"};
-    json& idx = index_root();
-    if (!idx.contains(name)) return {false, "No such file in repository: " + name};
 
-    const store::Layout& L = store::layout();
-    const U8list master = RepoKey(key);
-    const json& entry = idx[name];
+    std::error_code ec;
+    if (!fs::is_directory(src_dir, ec)) {
+        return {false, "Not a directory: " + src_dir};
+    }
 
+    std::string prefix = internal_prefix.empty() ? "/" : NormalizeInternalPath(internal_prefix);
+    if (prefix.empty()) return {false, "Invalid internal path"};
+
+    std::vector<fs::path> items;
+    for (fs::recursive_directory_iterator it(src_dir, fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) break;
+        std::error_code dir_ec;
+        if (it->is_directory(dir_ec)) continue;
+        items.push_back(it->path());
+    }
+    std::sort(items.begin(), items.end());
+
+    std::string first_error;
+    for (const fs::path& p : items) {
+        std::error_code rec_ec;
+        fs::path rel = fs::relative(p, src_dir, rec_ec);
+        if (rec_ec) {
+            ++failed;
+            continue;
+        }
+        std::string rel_str;
+        for (const auto& part : rel) {
+            if (!rel_str.empty()) rel_str += '/';
+            rel_str += part.string();
+        }
+        const std::string target = (prefix == "/" ? "" : prefix) + "/" + rel_str;
+        Result r = add_file(p.string(), target, key);
+        if (r.status) {
+            ++added;
+        } else {
+            ++failed;
+            if (first_error.empty()) first_error = r.message;
+        }
+    }
+
+    if (added == 0 && failed > 0) return {false, "Import failed: " + first_error};
+
+    std::string msg = "Imported " + std::to_string(added) + " file(s) into " +
+                      (prefix == "/" ? std::string("/") : prefix);
+    if (failed) msg += ", " + std::to_string(failed) + " skipped (" + first_error + ")";
+    return {true, msg};
+}
+
+// ---------------------------------------------------------------- 读取
+
+static Result export_one(const std::string& internal, const fs::path& out_path,
+                         const json& entry, const U8list& master,
+                         const store::Layout& L) {
     U8list plain;
     if (!entry.contains("kind") || !entry.contains("size")) {
-        return {false, "Corrupted index entry: " + name};
+        return {false, "Corrupted index entry: " + internal};
     }
 
     if (entry["kind"] == "small") {
@@ -247,70 +399,198 @@ Result get_file(const std::string& name, const std::string& dst_in, const U8list
             plain.insert(plain.end(), payload.begin(), payload.end());
         }
     } else {
-        return {false, "Unknown entry kind for " + name};
+        return {false, "Unknown entry kind for " + internal};
     }
 
     const std::uint64_t size = entry["size"].get<std::uint64_t>();
-    if (plain.size() < size) return {false, "Truncated data for " + name};
+    if (plain.size() < size) return {false, "Truncated data for " + internal};
     plain.resize(static_cast<std::size_t>(size));
 
     if (entry.contains("sha256")) {
         const std::string want = entry["sha256"].get<std::string>();
         if (Base64Encode(Sha256(plain)) != want) {
-            return {false, "Checksum mismatch for " + name};
+            return {false, "Checksum mismatch for " + internal};
         }
     }
 
-    std::string dst = dst_in.empty() ? name : dst_in;
-    fs::path out_path(dst);
-    if (out_path.has_parent_path()) {
-        std::error_code ec;
-        fs::create_directories(out_path.parent_path(), ec);
-    }
-    if (!write_all(dst, plain)) return {false, "Cannot write " + dst};
-
-    return {true, "Extracted " + name + " -> " + dst + " (" + std::to_string(size) + " bytes)"};
+    std::string err;
+    if (!parent_dirs_ok(out_path, err)) return {false, "Cannot create directory: " + err};
+    if (!write_all(out_path.string(), plain)) return {false, "Cannot write " + out_path.string()};
+    return {true, ""};
 }
 
-Result remove_file(const std::string& name, const U8list& key) {
+Result get_file(const std::string& internal_in, const std::string& dst_in, const U8list& key) {
     if (!check_dir()) return {false, "Repository not initialized"};
+
+    std::string internal = NormalizeInternalPath(internal_in);
+    if (internal.empty()) return {false, "Invalid internal path"};
+
     json& idx = index_root();
-    if (!idx.contains(name)) return {false, "No such file in repository: " + name};
-
     const store::Layout& L = store::layout();
-    const json& entry = idx[name];
-    std::string kind = entry.value("kind", "");
+    const U8list master = RepoKey(key);
 
-    if (kind == "small") {
-        std::vector<std::uint8_t> bits;
-        if (!store::bitmap_load(L.smbitmap, bits)) return {false, "Cannot read small bitmap"};
-        store::bitmap_set(bits, entry["slot"].get<std::uint64_t>(), false);
-        if (!store::bitmap_save(L.smbitmap, bits)) return {false, "Cannot update small bitmap"};
-    } else if (kind == "blk") {
-        std::vector<std::uint8_t> bits;
-        if (!store::bitmap_load(L.bitmap, bits)) return {false, "Cannot read bitmap"};
-        for (const auto& b : entry["blocks"]) {
-            store::bitmap_set(bits, b.get<std::uint64_t>(), false);
+    // 1) 精确命中：导出单个文件
+    if (idx.contains(internal)) {
+        fs::path out_path;
+        if (!dst_in.empty()) {
+            std::error_code ec;
+            if (fs::is_directory(dst_in, ec)) {
+                out_path = fs::path(dst_in) / split_path(internal).back();
+            } else {
+                out_path = fs::path(dst_in);
+            }
+        } else {
+            out_path = to_fs_path(OutputRoot(), internal);
         }
-        if (!store::bitmap_save(L.bitmap, bits)) return {false, "Cannot update bitmap"};
-    } else {
-        return {false, "Unknown entry kind for " + name};
+        Result r = export_one(internal, out_path, idx[internal], master, L);
+        if (!r.status) return r;
+        const std::uint64_t size = idx[internal]["size"].get<std::uint64_t>();
+        return {true, "Extracted " + internal + " -> " + out_path.string() + " (" +
+                          std::to_string(size) + " bytes)"};
     }
 
-    idx.erase(name);
-    if (!save_index(RepoKey(key))) return {false, "Cannot write index"};
-    return {true, "Removed " + name};
+    // 2) 前缀命中：导出整个目录树
+    struct Match {
+        std::string path;
+        const json* entry;
+    };
+    std::vector<Match> matches;
+    const std::string prefix = (internal == "/") ? "/" : internal + "/";
+    for (auto it = idx.begin(); it != idx.end(); ++it) {
+        if (it.key().rfind(prefix, 0) == 0) matches.push_back({it.key(), &it.value()});
+    }
+    if (matches.empty()) return {false, "No such file or directory in repository: " + internal};
+
+    const fs::path base = dst_in.empty() ? to_fs_path(OutputRoot(), internal) : fs::path(dst_in);
+    std::string err;
+    if (!EnsureDirectory(base.string(), err)) {
+        return {false, "Cannot create " + base.string() + ": " + err};
+    }
+
+    int done = 0;
+    std::string first_error;
+    for (const Match& m : matches) {
+        const std::string rel = m.path.substr(prefix.size());
+        fs::path out = base;
+        for (const std::string& seg : split_path(rel)) out /= seg;
+        Result r = export_one(m.path, out, *m.entry, master, L);
+        if (r.status) {
+            ++done;
+        } else if (first_error.empty()) {
+            first_error = r.message;
+        }
+    }
+    if (done == 0) return {false, "Extract failed: " + first_error};
+    return {true, "Extracted " + std::to_string(done) + " file(s) from " + internal + " -> " +
+                      base.string()};
 }
 
-bool list_files(std::vector<std::pair<std::string, std::uint64_t>>& out) {
+// ---------------------------------------------------------------- 删除
+
+Result remove_file(const std::string& internal_in, const U8list& key, bool recursive) {
+    if (!check_dir()) return {false, "Repository not initialized"};
+
+    std::string internal = NormalizeInternalPath(internal_in);
+    if (internal.empty()) return {false, "Invalid internal path"};
+
+    json& idx = index_root();
+    const store::Layout& L = store::layout();
+
+    std::vector<std::string> targets;
+    if (idx.contains(internal)) {
+        targets.push_back(internal);
+    } else {
+        const std::string prefix = (internal == "/") ? "/" : internal + "/";
+        for (auto it = idx.begin(); it != idx.end(); ++it) {
+            if (it.key().rfind(prefix, 0) == 0) targets.push_back(it.key());
+        }
+        if (targets.empty()) return {false, "No such file or directory in repository: " + internal};
+        if (!recursive) {
+            return {false, "'" + internal + "' is a directory (" + std::to_string(targets.size()) +
+                               " files), use rm -r to delete it"};
+        }
+    }
+
+    std::vector<std::uint8_t> bits;
+    std::vector<std::uint8_t> small_bits;
+    bool blocks_dirty = false;
+    bool small_dirty = false;
+
+    for (const std::string& t : targets) {
+        const json& entry = idx[t];
+        const std::string kind = entry.value("kind", "");
+        if (kind == "small") {
+            if (small_bits.empty()) store::bitmap_load(L.smbitmap, small_bits);
+            store::bitmap_set(small_bits, entry["slot"].get<std::uint64_t>(), false);
+            small_dirty = true;
+        } else if (kind == "blk") {
+            if (bits.empty()) store::bitmap_load(L.bitmap, bits);
+            for (const auto& b : entry["blocks"]) {
+                store::bitmap_set(bits, b.get<std::uint64_t>(), false);
+            }
+            blocks_dirty = true;
+        }
+    }
+
+    if (blocks_dirty && !store::bitmap_save(L.bitmap, bits)) return {false, "Cannot update bitmap"};
+    if (small_dirty && !store::bitmap_save(L.smbitmap, small_bits)) {
+        return {false, "Cannot update small bitmap"};
+    }
+
+    for (const std::string& t : targets) idx.erase(t);
+    if (!save_index(RepoKey(key))) return {false, "Cannot write index"};
+
+    if (targets.size() == 1) return {true, "Removed " + targets[0]};
+    return {true, "Removed " + std::to_string(targets.size()) + " file(s) under " + internal};
+}
+
+// ---------------------------------------------------------------- 列表
+
+bool list_files(const std::string& prefix_in, bool recursive, std::vector<ListRow>& out) {
     out.clear();
     json& idx = index_root();
-    for (auto it = idx.begin(); it != idx.end(); ++it) {
+
+    std::string prefix = prefix_in.empty() ? "/" : NormalizeInternalPath(prefix_in);
+    if (prefix.empty()) return false;
+    if (prefix != "/" && idx.contains(prefix)) {
         std::uint64_t size = 0;
-        if (it.value().contains("size")) size = it.value()["size"].get<std::uint64_t>();
-        out.emplace_back(it.key(), size);
+        if (idx[prefix].contains("size")) size = idx[prefix]["size"].get<std::uint64_t>();
+        out.push_back({prefix, size, false});
+        return true;
     }
-    std::sort(out.begin(), out.end());
+    const std::string base = (prefix == "/") ? "/" : prefix + "/";
+
+    if (recursive) {
+        for (auto it = idx.begin(); it != idx.end(); ++it) {
+            if (it.key().rfind(base, 0) != 0) continue;
+            std::uint64_t size = 0;
+            if (it.value().contains("size")) size = it.value()["size"].get<std::uint64_t>();
+            out.push_back({it.key(), size, false});
+        }
+    } else {
+        std::set<std::string> dirs;
+        std::map<std::string, std::uint64_t> plain_files;
+        for (auto it = idx.begin(); it != idx.end(); ++it) {
+            if (it.key().rfind(base, 0) != 0) continue;
+            const std::string rest = it.key().substr(base.size());
+            if (rest.empty()) continue;
+            const std::size_t slash = rest.find('/');
+            if (slash == std::string::npos) {
+                std::uint64_t size = 0;
+                if (it.value().contains("size")) size = it.value()["size"].get<std::uint64_t>();
+                plain_files[rest] = size;
+            } else {
+                dirs.insert(base + rest.substr(0, slash));
+            }
+        }
+        for (const std::string& d : dirs) out.push_back({d, 0, true});
+        for (const auto& kv : plain_files) out.push_back({base + kv.first, kv.second, false});
+    }
+
+    std::sort(out.begin(), out.end(), [](const ListRow& a, const ListRow& b) {
+        if (a.dir != b.dir) return a.dir;
+        return a.path < b.path;
+    });
     return true;
 }
 

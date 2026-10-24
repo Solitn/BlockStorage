@@ -1,17 +1,26 @@
 #include "command.h"
 
+#ifdef _MSC_VER
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "config.h"
 #include "encrypt.h"
 #include "files.h"
 #include "main.h"
 #include "store.h"
 #include "types.h"
+
+namespace fs = std::filesystem;
 
 const std::string VER = "0.1";
 
@@ -38,15 +47,76 @@ Result require_loaded() {
 }  // namespace
 
 const std::map<std::string, CommandEntry> COMMANDS = {
-    {"init",   {cmd_init,   "Initialize a new repository, add -p<password> and -s<salt> to encrypt it"}},
-    {"load",   {cmd_load,   "Unlock the repository: load -p<password>"}},
-    {"add",    {cmd_add,    "Add a file: add <source> [name]"}},
-    {"get",    {cmd_get,    "Extract a file: get <name> [destination]"}},
-    {"ls",     {cmd_ls,     "List files stored in the repository"}},
-    {"rm",     {cmd_rm,     "Remove a file from the repository: rm <name>"}},
-    {"statu",  {cmd_statu,  "Show the current status of the repository"}},
-    {"delete", {cmd_delete, "Delete the repository"}},
-    {"help",   {cmd_help,   "Show this help message"}}
+    {"init",   {cmd_init,   "init [-p<pwd>] [-s<salt>]        create a repository (optionally encrypted)"}},
+    {"load",   {cmd_load,   "load -p<pwd>                     unlock the repository"}},
+    {"add",    {cmd_add,    "add <src> [内路径] [-r]          add a file, or a whole folder with -r"}},
+    {"get",    {cmd_get,    "get <内路径> [目标]               extract a file or a whole folder"}},
+    {"ls",     {cmd_ls,     "ls [内路径] [-r]                  list entries (tree with -r)"}},
+    {"rm",     {cmd_rm,     "rm <内路径> [-r]                  remove a file, or a folder with -r"}},
+    {"out",    {cmd_out,    "out [路径]                        show / set default extract root"}},
+    {"statu",  {cmd_statu,  "statu                            show repository status"}},
+    {"delete", {cmd_delete, "delete                           delete the whole repository"}},
+    {"help",   {cmd_help,   "help [命令]                       show help (per-command details)"}}
+};
+
+// help <命令> 的详细说明
+const std::map<std::string, std::string> HELP_DETAILS = {
+    {"init",
+     "init [-p<pwd>] [-s<salt>]\n"
+     "  在当前目录创建 .block/ 仓库。\n"
+     "  -p<pwd>   用密码加密（PBKDF2-HMAC-SHA256, 600000 轮）\n"
+     "  -s<salt>  指定盐（默认随机 32 字节）\n"
+     "  不带 -p 时为无密码仓库：仅混淆，不保密。"},
+    {"load",
+     "load -p<pwd>\n"
+     "  校验密码并解密索引。每次启动进程后都要先 load（无密码仓库除外）。\n"
+     "  错误密码会提示 Incorrect password。"},
+    {"add",
+     "add <src> [内路径] [-r]\n"
+     "  <src> 是文件时：加入单个文件。\n"
+     "    省略内路径      -> /<文件名>\n"
+     "    内路径以 / 结尾 -> 放入该目录，如 add a.txt /docs/\n"
+     "    否则            -> 作为完整内部路径，如 add a.txt /docs/a.txt\n"
+     "  <src> 是文件夹 或 带 -r 时：递归导入其下所有文件。\n"
+     "    省略内路径      -> /<文件夹名>/...\n"
+     "    指定内路径      -> /docs/...（保留子目录结构）\n"
+     "  例：add D:\\proj /backup/proj        # D:\\proj 整棵树 -> /backup/proj/..."},
+    {"get",
+     "get <内路径> [目标]\n"
+     "  精确命中文件：导出该文件。\n"
+     "    [目标] 省略 -> <out 根目录>/<内路径>\n"
+     "    [目标] 是目录 -> <目标>/<文件名>\n"
+     "    [目标] 是路径 -> 直接写到该路径\n"
+     "  前缀命中目录：导出整棵子树（保留目录结构）。\n"
+     "    省略 [目标] -> <out 根目录>/<内路径>\n"
+     "  例：get /docs                 -> 导出 /docs 下所有文件\n"
+     "      get /docs D:\\restore     -> 导出到 D:\\restore/<相对路径>\n"
+     "      get /                    -> 导出整个仓库"},
+    {"ls",
+     "ls [内路径] [-r]\n"
+     "  不带参数：列出仓库根目录的直接子项（目录带 / 后缀）。\n"
+     "  带内路径：列出该目录下的直接子项。\n"
+     "  -r：递归列出全部文件。\n"
+     "  例：ls /            ls /docs -r"},
+    {"rm",
+     "rm <内路径> [-r]\n"
+     "  删除单个文件；目录需要 -r。删除会回收块位图并更新索引。\n"
+     "  例：rm /docs/a.txt        rm /docs -r"},
+    {"out",
+     "out [路径]\n"
+     "  不带参数：显示当前默认导出根目录。\n"
+     "  带路径：设置为该目录并写入 .block/config.json。\n"
+     "  优先级：环境变量 BLOCKSTORAGE_OUT > .block/config.json > C:\\BlockStorage\\extract\n"
+     "  例：out D:\\restore       out"},
+    {"statu",
+     "statu\n"
+     "  显示仓库标志（isfind/iscomplete/haskey/hasload）、块与槽使用率、文件数、导出根目录。"},
+    {"delete",
+     "delete\n"
+     "  删除当前目录下的整个 .block/ 仓库（不可恢复）。"},
+    {"help",
+     "help [命令]\n"
+     "  不带参数列出所有命令；带命令名显示该命令的详细用法与原理解释。"}
 };
 
 Result getStatu(const Args& args) {
@@ -140,11 +210,23 @@ Result cmd_statu(const Args& args) {
         if (res_statu.hasload) {
             if (!g_index_loaded) g_index_loaded = load_index(res_statu.key);
             if (g_index_loaded) {
-                std::vector<std::pair<std::string, std::uint64_t>> list;
-                list_files(list);
-                std::cout << "files      : " << list.size() << "\n";
+                std::vector<ListRow> rows;
+                list_files("/", true, rows);
+                std::size_t dirs = 0;
+                std::set<std::string> seen;
+                for (const ListRow& r : rows) {
+                    std::string p = r.path;
+                    std::size_t pos = 0;
+                    while ((pos = p.find('/', pos + 1)) != std::string::npos) {
+                        seen.insert(p.substr(0, pos));
+                    }
+                }
+                dirs = seen.size();
+                std::cout << "files      : " << rows.size() << "\n";
+                std::cout << "folders    : " << dirs << "\n";
             }
         }
+        std::cout << "out root   : " << OutputRoot() << "\n";
     }
     return {true, ""};
 }
@@ -165,11 +247,22 @@ Result cmd_delete(const Args& args) {
 }
 
 Result cmd_help(const Args& args) {
-    (void)args;
-    std::cout << "Available commands:" << std::endl;
-    for (const auto& [name, entry] : COMMANDS) {
-        std::cout << "  " << name << ": " << entry.desc << std::endl;
+    if (args.size() >= 2) {
+        const std::string& topic = args[1];
+        auto it = HELP_DETAILS.find(topic);
+        if (it == HELP_DETAILS.end()) {
+            return {false, "No detailed help for '" + topic + "', try: help"};
+        }
+        std::cout << it->second << std::endl;
+        return {true, ""};
     }
+    std::cout << "Available commands (help <命令> 查看详细用法):" << std::endl;
+    for (const auto& [name, entry] : COMMANDS) {
+        std::cout << "  " << entry.desc << std::endl;
+    }
+    std::cout << "\n内部路径：仓库内一律使用 / 分隔，例如 /docs/2024/a.txt\n"
+              << "  首次使用：init -p<密码>  ->  add <文件或文件夹>  ->  ls  ->  get <内部路径>\n"
+              << "  详细操作指南见仓库根目录 help.md" << std::endl;
     return {true, ""};
 }
 
@@ -264,7 +357,7 @@ Result cmd_init(const Args& args) {
     res_statu.key_sha256 = digest;
     g_index_loaded = true;
     files = json::object();
-    files["version"] = 1;
+    files["version"] = 2;
     files["files"] = json::object();
 
     std::cout << "salt (Base64): " << Base64Encode(salt_bytes) << std::endl;
@@ -273,15 +366,44 @@ Result cmd_init(const Args& args) {
 }
 
 Result cmd_add(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: add <source> [name]"};
+    if (args.size() < 2) return {false, "Usage: add <source> [内路径] [-r]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
-    const std::string name = args.size() >= 3 ? args[2] : std::string();
-    return add_file(args[1], name, res_statu.key);
+
+    bool recursive = false;
+    std::string src;
+    std::string internal;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-r" || args[i] == "--recursive") {
+            recursive = true;
+            continue;
+        }
+        if (src.empty()) {
+            src = args[i];
+        } else if (internal.empty()) {
+            internal = args[i];
+        } else {
+            return {false, "Too many arguments, usage: add <source> [内路径] [-r]"};
+        }
+    }
+    if (src.empty()) return {false, "Usage: add <source> [内路径] [-r]"};
+
+    std::error_code ec;
+    const bool is_dir = !recursive && fs::is_directory(src, ec);
+    if (is_dir) {
+        if (internal.empty()) internal = "/" + fs::path(src).filename().string();
+        int added = 0;
+        int failed = 0;
+        return add_tree(src, internal, res_statu.key, added, failed);
+    }
+    if (recursive && !fs::is_directory(src, ec)) {
+        return {false, "-r 只能用于文件夹: " + src};
+    }
+    return add_file(src, internal, res_statu.key);
 }
 
 Result cmd_get(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: get <name> [destination]"};
+    if (args.size() < 2) return {false, "Usage: get <内路径> [目标]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
     const std::string dst = args.size() >= 3 ? args[2] : std::string();
@@ -289,30 +411,73 @@ Result cmd_get(const Args& args) {
 }
 
 Result cmd_rm(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: rm <name>"};
+    if (args.size() < 2) return {false, "Usage: rm <内路径> [-r]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
-    return remove_file(args[1], res_statu.key);
+    bool recursive = false;
+    std::string target;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-r" || args[i] == "--recursive") {
+            recursive = true;
+        } else if (target.empty()) {
+            target = args[i];
+        } else {
+            return {false, "Too many arguments, usage: rm <内路径> [-r]"};
+        }
+    }
+    if (target.empty()) return {false, "Usage: rm <内路径> [-r]"};
+    return remove_file(target, res_statu.key, recursive);
 }
 
 Result cmd_ls(const Args& args) {
-    (void)args;
     Result pre = require_loaded();
     if (!pre.status) return pre;
-    std::vector<std::pair<std::string, std::uint64_t>> list;
-    list_files(list);
-    if (list.empty()) return {true, "Repository is empty"};
-    std::cout << "NAME                             SIZE      KIND\n";
-    for (const auto& [name, size] : list) {
-        std::cout << name;
-        if (name.size() < 33) std::cout << std::string(33 - name.size(), ' ');
-        else std::cout << " ";
-        std::cout << size;
-        if (std::to_string(size).size() < 10) {
-            std::cout << std::string(10 - std::to_string(size).size(), ' ');
+
+    bool recursive = false;
+    std::string prefix;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-r" || args[i] == "--recursive") {
+            recursive = true;
+        } else if (prefix.empty()) {
+            prefix = args[i];
+        } else {
+            return {false, "Too many arguments, usage: ls [内路径] [-r]"};
         }
-        std::cout << (size <= store::kSmallSize ? "small" : "blk") << "\n";
     }
+
+    std::vector<ListRow> rows;
+    if (!list_files(prefix, recursive, rows)) return {false, "Invalid internal path"};
+    if (rows.empty()) return {true, "Repository is empty"};
+
+    std::cout << "TYPE  SIZE          PATH\n";
+    for (const ListRow& r : rows) {
+        if (r.dir) {
+            std::cout << "dir   -             " << r.path << "/\n";
+            continue;
+        }
+        const std::string size = std::to_string(r.size);
+        std::cout << "file  " << size;
+        if (size.size() < 13) std::cout << std::string(13 - size.size(), ' ');
+        std::cout << " " << r.path << "\n";
+    }
+    return {true, ""};
+}
+
+Result cmd_out(const Args& args) {
+    if (args.size() >= 2) {
+        std::string err;
+        if (!SetOutputRoot(args[1], err)) {
+            return {false, "Cannot set output root: " + err};
+        }
+        return {true, "Default extract root set to " + args[1]};
+    }
+    const std::string from_env = EnvOutputRoot();
+    const std::string src = !from_env.empty()
+                                ? "environment variable BLOCKSTORAGE_OUT"
+                                : (OutputRoot() == DefaultOutputRoot() ? std::string("default")
+                                                                      : std::string(".block/config.json"));
+    std::cout << "output root : " << OutputRoot() << "\n";
+    std::cout << "source      : " << src << "\n";
     return {true, ""};
 }
 

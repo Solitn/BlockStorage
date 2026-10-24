@@ -15,5 +15,6 @@ Result cmd_add(const Args& args);
 Result cmd_get(const Args& args);
 Result cmd_ls(const Args& args);
 Result cmd_rm(const Args& args);
+Result cmd_out(const Args& args);
 Result command(const std::string& input);
 std::vector<std::string> SplitCommandLine(const std::string& cmd);

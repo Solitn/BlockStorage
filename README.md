@@ -78,18 +78,42 @@ powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保�
 
 ## 命令
 
+> 完整操作手册（含典型工作流、错误速查、FAQ）：[help.md](help.md)
+
 | 命令 | 说明 |
 |---|---|
-| `init [-p<pwd>] [-s<salt>]` | 初始化仓库；带 `-p` 则用密码加密，`-s` 指定盐（默认随机） |
-| `load -p<pwd>` | 解锁仓库（进程启动后需重新解锁） |
-| `add <源文件> [仓库内名]` | 添加文件，省略名字则用源文件名 |
-| `get <名字> [目标路径]` | 取出并解密文件，校验 SHA-256 |
-| `ls` | 列出仓库内文件 |
-| `rm <名字>` | 删除文件并回收块 |
-| `statu` | 仓库状态、块使用率、文件数 |
+| `init [-p<pwd>] [-s<salt>]` | 初始化仓库；带 `-p` 用密码加密，`-s` 指定盐（默认随机） |
+| `load -p<pwd>` | 解锁仓库（每个进程启动后都要解锁） |
+| `add <源> [内路径] [-r]` | 加入文件或整个文件夹（保留子目录结构） |
+| `get <内路径> [目标]` | 取出文件或整个目录树；省略目标则用默认导出根 |
+| `ls [内路径] [-r]` | 列出条目（`-r` 递归） |
+| `rm <内路径> [-r]` | 删除文件；目录需 `-r` |
+| `out [路径]` | 查看/设置默认导出根目录 |
+| `statu` | 仓库状态、块与槽使用率、文件/目录数、导出根 |
 | `delete` | 删除整个 `.block/` 仓库 |
-| `help` | 帮助 |
+| `help [命令]` | 帮助（带命令名显示详细用法） |
 | `exit` / `quit` | 退出 |
+
+### 内部路径
+
+仓库内统一用 `/` 寻址，例如 `/docs/report.pdf`。目录由文件路径隐式形成：
+
+```text
+add D:\photos                 -> /photos/2024/a.jpg
+add D:\photos /backup/photos  -> /backup/photos/2024/a.jpg
+add D:\a.txt /docs/           -> /docs/a.txt
+get /backup/photos D:\restore -> D:\restore\2024\a.jpg
+```
+
+### 默认导出根目录
+
+`get` 不带目标时写入 `<out 根>/<内部路径>`，优先级：
+
+1. 环境变量 `BLOCKSTORAGE_OUT`
+2. `.block/config.json` 的 `output_root`（由 `out <路径>` 写入）
+3. 内置默认 `C:\BlockStorage\extract`
+
+`scripts/env.ps1` 会把 `BLOCKSTORAGE_OUT` 指向仓库内 `out\extract`，方便开发测试。
 
 ## 仓库格式
 
@@ -103,17 +127,19 @@ powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保�
 └── bitmap.small  小槽分配位图
 ```
 
-索引 JSON（解密后）：
+索引 JSON（解密后，v2 起使用内部路径）：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "files": {
-    "report.pdf": {"kind": "blk", "size": 245760, "sha256": "…", "blocks": [0, 1, 2]},
-    "note.txt":   {"kind": "small", "size": 42, "sha256": "…", "slot": 7}
+    "/docs/report.pdf": {"kind": "blk",   "size": 245760, "sha256": "…", "blocks": [0, 1, 2]},
+    "/docs/note.txt":   {"kind": "small", "size": 42,     "sha256": "…", "slot": 7}
   }
 }
 ```
+
+旧的扁平索引（v1，键为 `a.txt`）在 `load` 时会自动迁移为 `/a.txt`。
 
 ## 安全说明
 
@@ -127,15 +153,18 @@ powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保�
 ```
 .
 ├── CMakeLists.txt
-├── ARCHITECTURE.md        设计说明与已知问题
+├── README.md              快速开始与命令参考
+├── help.md                完整操作指南（工作流 / 错误速查 / FAQ）
+├── ARCHITECTURE.md        设计说明与已知限制
 ├── include/               头文件（含 nlohmann/json 单头文件）
 ├── src/                   实现
 │   ├── main.cpp           REPL 入口
 │   ├── command.cpp        命令表与各命令实现
+│   ├── files.cpp          内部路径 / 索引 / 分块读写 / 目录导入导出
 │   ├── store.cpp          定长记录 / 位图 / 目录管理
-│   ├── files.cpp          索引与文件读写（加密分块）
+│   ├── config.cpp         导出根目录配置（env / config.json / 默认）
 │   └── encrypt.cpp        PBKDF2 / AES-GCM / SHA-256 / Base64
 ├── scripts/               便携工具链下载、环境、构建脚本
-├── tests/test.ps1         端到端测试
+├── tests/test.ps1         端到端测试（53 项断言）
 └── tools/                 便携工具链（已忽略，不入库）
 ```

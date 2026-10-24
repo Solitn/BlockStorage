@@ -12,11 +12,22 @@ bool load_index(const U8list& key);
 bool save_index(const U8list& key);
 U8list RepoKey(const U8list& key);
 
-// 文件操作
-Result add_file(const std::string& src, const std::string& name, const U8list& key);
-Result get_file(const std::string& name, const std::string& dst, const U8list& key);
-Result remove_file(const std::string& name, const U8list& key);
-bool list_files(std::vector<std::pair<std::string, std::uint64_t>>& out);
+// 内部路径："a\\b" / "/a/b/" -> "/a/b"；非法（含 .. ）返回空串；根目录返回 "/"
+std::string NormalizeInternalPath(const std::string& raw);
+
+// 文件操作（internal 为仓库内部路径）
+Result add_file(const std::string& src, const std::string& internal, const U8list& key);
+Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
+                const U8list& key, int& added, int& failed);
+Result get_file(const std::string& internal, const std::string& dst, const U8list& key);
+Result remove_file(const std::string& internal, const U8list& key, bool recursive);
+
+struct ListRow {
+    std::string path;   // 内部路径
+    std::uint64_t size = 0;
+    bool dir = false;
+};
+bool list_files(const std::string& prefix, bool recursive, std::vector<ListRow>& out);
 
 struct StoreStats {
     std::uint64_t blocks = 0;

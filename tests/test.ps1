@@ -64,6 +64,9 @@ function New-Sample([string]$path, [int]$size) {
 if (Test-Path $Work) { Remove-Item $Work -Recurse -Force }
 New-Item -ItemType Directory -Path $Work, (Join-Path $Work 'src'), (Join-Path $Work 'out') -Force | Out-Null
 
+# 默认导出根目录走环境变量（避免写到 C:\），同时测试 env 优先级
+$env:BLOCKSTORAGE_OUT = Join-Path $Work 'dropped'
+
 $sizes = [ordered]@{ 'empty.bin' = 0; 'one.bin' = 1; 's511.bin' = 511; 's512.bin' = 512;
                      's513.bin' = 513; 's4096.bin' = 4096; 's4097.bin' = 4097; 'big.bin' = 1048576 }
 foreach ($k in $sizes.Keys) { New-Sample (Join-Path $Work "src\$k") $sizes[$k] }
@@ -80,8 +83,8 @@ $lines = @()
 foreach ($k in $sizes.Keys) { $lines += "add src\$k" }
 $lines += 'ls'
 $out = Run-Repo ($lines + 'exit')
-foreach ($k in $sizes.Keys) { Check "add $k" ($out -match [regex]::Escape("Added $k")) }
-$lsRows = ($out -split "`n") | Where-Object { $_ -match '^\S+\.bin\s+\d+' }
+foreach ($k in $sizes.Keys) { Check "add $k" ($out -match [regex]::Escape("Added /$k")) }
+$lsRows = ($out -split "`n") | Where-Object { $_ -match '^file\s+\d+\s+/' }
 Check 'ls lists 8 files' ($lsRows.Count -eq 8) "got $($lsRows.Count)"
 
 Write-Host "== get (round-trip) ==" -ForegroundColor Cyan
@@ -103,9 +106,9 @@ Check 'missing rm rejected' ($out -match 'No such file')
 
 Write-Host "== delete / remove ==" -ForegroundColor Cyan
 $out = Run-Repo @('rm big.bin', 'ls', 'exit')
-Check 'rm works' ($out -match 'Removed big.bin')
-$lsRows = ($out -split "`n") | Where-Object { $_ -match '^\S+\.bin\s+\d+' }
-Check 'ls no longer lists big.bin' (-not ($lsRows -match '^big\.bin'))
+Check 'rm works' ($out -match 'Removed /big.bin')
+$lsRows = ($out -split "`n") | Where-Object { $_ -match '^file\s+\d+\s+/' }
+Check 'ls no longer lists big.bin' (-not ($lsRows -match '/big\.bin'))
 
 Write-Host "== lock / unlock ==" -ForegroundColor Cyan
 $out = Run-Repo -NoLoad @('ls', 'exit')
@@ -133,13 +136,67 @@ if ($bytes.Length -gt 4200) {
     Check 'restored data readable' ((Test-Path (Join-Path $Work 'out\one2.bin')))
 }
 
+Write-Host "== directory tree (内部路径) ==" -ForegroundColor Cyan
+$tree = Join-Path $Work 'tree'
+New-Item -ItemType Directory -Path (Join-Path $tree 'sub\deep'), (Join-Path $tree 'empty') -Force | Out-Null
+New-Sample (Join-Path $tree 'a.txt') 10
+New-Sample (Join-Path $tree 'sub\b.bin') 6000
+New-Sample (Join-Path $tree 'sub\deep\c.txt') 3
+
+# 1) 整个文件夹 -> 内部路径 /archive/tree
+$out = Run-Repo @("add $tree /archive/tree", 'ls /archive -r', 'exit')
+Check 'import folder keeps tree' ($out -match 'Imported 3 file\(s\) into /archive/tree')
+Check 'ls -r shows nested paths' (($out -match '/archive/tree/sub/deep/c\.txt') -and ($out -match '/archive/tree/sub/b\.bin'))
+
+# 2) 文件 -> 指定内部文件名
+$out = Run-Repo @("add $tree\a.txt /notes/hello.txt", 'ls /notes', 'exit')
+Check 'add file to explicit path' ($out -match 'Added /notes/hello\.txt')
+
+# 3) 文件 -> 放入某目录（尾部斜杠）
+$out = Run-Repo @("add $tree\a.txt /notes/", 'ls /notes -r', 'exit')
+Check 'add file into folder' ($out -match 'Added /notes/a\.txt')
+
+# 4) 反向：整棵目录导出到指定目录
+$restoreA = Join-Path $Work 'restoreA'
+$out = Run-Repo @("get /archive $restoreA", 'exit')
+Check 'export folder reports count' ($out -match 'Extracted 3 file\(s\) from /archive')
+Check 'exported nested file exists' (Test-Path (Join-Path $restoreA 'tree\sub\deep\c.txt'))
+Check 'exported content matches' ((Get-FileHash (Join-Path $tree 'sub\b.bin')).Hash -eq
+                                  (Get-FileHash (Join-Path $restoreA 'tree\sub\b.bin')).Hash)
+
+# 5) 反向：不带目标 -> 使用默认导出根（环境变量 BLOCKSTORAGE_OUT）
+$out = Run-Repo @('get /archive/tree/sub/deep/c.txt', 'exit')
+$defaultFile = Join-Path $Work 'dropped\archive\tree\sub\deep\c.txt'
+Check 'default out root used' (Test-Path $defaultFile)
+
+# 6) out 命令：显示 / 设置
+$out = Run-Repo @('out', 'exit')
+Check 'out shows env source' ($out -match 'BLOCKSTORAGE_OUT')
+$cfgOut = Join-Path $Work 'cfgout'
+$saved = $env:BLOCKSTORAGE_OUT
+Remove-Item Env:\BLOCKSTORAGE_OUT -ErrorAction SilentlyContinue
+$out = Run-Repo -NoLoad @("load -p$Pwd0", "out $cfgOut", 'out', 'exit')
+Check 'out sets config' ($out -match 'Default extract root set')
+Check 'config file written' (Test-Path (Join-Path $Work '.block\config.json'))
+Check 'config source reported' ($out -match '\.block/config\.json')
+$env:BLOCKSTORAGE_OUT = $saved
+
+# 7) rm 目录：不带 -r 拒绝，带 -r 删除
+$out = Run-Repo @('rm /archive', 'rm /archive -r', 'ls /archive -r', 'exit')
+Check 'rm dir needs -r' ($out -match 'is a directory.*use rm -r')
+Check 'rm -r removes subtree' ($out -match 'Removed 3 file\(s\) under /archive')
+
+# 8) 非法内部路径
+$out = Run-Repo @("add $tree\a.txt /a/../b", 'exit')
+Check 'path traversal rejected' ($out -match 'Invalid internal path')
+
 Write-Host "== no-password repository ==" -ForegroundColor Cyan
 $plain = Join-Path $Work 'plain'
 New-Item -ItemType Directory -Path $plain -Force | Out-Null
 New-Sample (Join-Path $plain 'a.bin') 100
 $out = Run-Repo -NoLoad -Dir $plain @('init', 'add a.bin', 'get a.bin a.out', 'exit')
 Check 'keyless init ok' ($out -match 'no password')
-Check 'keyless add ok' ($out -match 'Added a.bin')
+Check 'keyless add ok' ($out -match 'Added /a\.bin')
 Check 'keyless round-trip' ((Get-FileHash (Join-Path $plain 'a.bin')).Hash -eq (Get-FileHash (Join-Path $plain 'a.out')).Hash)
 
 Write-Host "== delete repository ==" -ForegroundColor Cyan

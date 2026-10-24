@@ -9,15 +9,16 @@ BlockStorage 是一个命令行加密"块存储"工具：在当前目录创建 `
 靠密码派生的密钥解锁。索引与数据块都使用 AES-256-GCM，逐块独立加密。
 
 ```
-CLI (REPL)  →  command  →  files (索引/文件语义)  →  store (定长记录/位图)  →  .block/*
-                                   ↘ encrypt (PBKDF2 / AES-GCM / SHA-256)
+CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (定长记录/位图)  →  .block/*
+                    ↘ config (导出根)        ↘ encrypt (PBKDF2 / AES-GCM / SHA-256)
 ```
 
 | 层 | 文件 | 职责 |
 |---|---|---|
 | 入口 | `src/main.cpp` | REPL、EOF/exit 处理、结果打印 |
-| 命令 | `src/command.cpp` | 命令表、参数解析、`init/load/delete/statu/help` |
-| 文件语义 | `src/files.cpp` | 增删查取、分块与小文件分流、索引 JSON 读写 |
+| 命令 | `src/command.cpp` | 命令表、参数解析、`help <cmd>` 详情、全部命令实现 |
+| 文件语义 | `src/files.cpp` | 内部路径归一化、目录树导入导出、分块与小文件分流、索引 JSON |
+| 配置 | `src/config.cpp` | 导出根目录：env `BLOCKSTORAGE_OUT` > `.block/config.json` > `C:\BlockStorage\extract` |
 | 存储 | `src/store.cpp` | 定长记录读写、位图分配、目录创建 |
 | 密码学 | `src/encrypt.cpp` | PBKDF2、SHA-256、AES-256-GCM、Base64、子密钥派生 |
 
@@ -30,24 +31,41 @@ CLI (REPL)  →  command  →  files (索引/文件语义)  →  store (定长�
 ├── data.blk       大块区：每块 4124 B = nonce(12) ‖ ct(4096) ‖ tag(16)
 ├── bitmap         大块位图，1 bit/块
 ├── data.small     小槽区：每槽 540 B = nonce(12) ‖ ct(512) ‖ tag(16)
-└── bitmap.small   小槽位图
+├── bitmap.small   小槽位图
+└── config.json    可选：{"output_root": "..."}（明文，非敏感）
 ```
 
 - **分流阈值**：`size ≤ 512` 走小槽，否则按 4096 B 分块（末块零填充，真实长度记在索引里）
 - **分配**：`bitmap_first_free()` 找首个空位；位图不够长时按 `record_count()` 追加
 - **回收**：删除时清位图；数据区文件不收缩（后续分配会复用空洞）
 
-索引（解密后）：
+索引（解密后，v2 起键为内部路径）：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "files": {
-    "a.bin": {"kind": "blk",   "size": 5000, "sha256": "b64", "blocks": [0, 3]},
-    "b.txt": {"kind": "small", "size": 40,   "sha256": "b64", "slot": 2}
+    "/docs/a.bin": {"kind": "blk",   "size": 5000, "sha256": "b64", "blocks": [0, 3]},
+    "/docs/b.txt": {"kind": "small", "size": 40,   "sha256": "b64", "slot": 2}
   }
 }
 ```
+
+### 2.1 内部路径
+
+- 统一 `/` 分隔；输入中的 `\` 自动转换
+- `NormalizeInternalPath()` 负责：折叠重复分隔符、拒绝 `.`/`..`/含 `:` 的段、去尾部斜杠
+- 目录不落盘，由文件路径隐式存在（空目录不保留）
+- 旧版 v1 索引（键为 `a.txt`）在 `load_index()` 时统一迁移为 `/a.txt`
+
+### 2.2 目录导入 / 导出
+
+| 操作 | 实现 |
+|---|---|
+| 导入 | `add_tree()` 用 `recursive_directory_iterator` 遍历，`fs::relative` 求相对路径，逐个调用 `add_file()` |
+| 导出 | `get_file()` 精确命中→单文件；否则按前缀匹配全部子孙，按相对路径重建目录 |
+| 删除 | `remove_file()` 精确命中→单文件；前缀命中需 `-r`，逐个清位图后统一写索引 |
+| 列表 | `list_files()` 非递归时折叠为"直接子项"（目录 / 文件），递归时列全路径 |
 
 ## 3. 密钥与加密
 
@@ -84,11 +102,13 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 |---|---|
 | `init [-p<pwd>] [-s<salt>]` | `create_area()` 建 6 个文件；带 `-p` 时写 `key`，并把派生密钥留在内存 |
 | `load -p<pwd>` | 校验 `SHA256(DeriveKey(pwd,salt))`，成功后 `load_index()` 解密 `idx` |
-| `add <src> [name]` | 读文件 → 分流 → 逐块加密写盘 → 更新位图 → `save_index()` |
-| `get <name> [dst]` | 读记录 → 解密 → 截断到 `size` → 校验 SHA-256 → 写目标 |
-| `ls` | 遍历索引，按名字排序，标注 `small`/`blk` |
-| `rm <name>` | 清位图 → 从索引删除 → `save_index()` |
-| `statu` | 仓库标志 + 块/槽使用率 + 文件数 |
+| `add <src> [内路径] [-r]` | 文件→`add_file`（尾随 `/` 视为目录，取源文件名）；目录→`add_tree` 递归保留结构 |
+| `get <内路径> [目标]` | 精确命中→单文件；前缀命中→整棵子树；无目标时落 `<out 根>/<内部路径>` |
+| `ls [内路径] [-r]` | `list_files()`：非递归折叠为直接子项，`-r` 列全部 |
+| `rm <内路径> [-r]` | 精确命中→单文件；目录必须 `-r`，批量清位图后统一写索引 |
+| `out [路径]` | 无参显示（含来源）；有参写入 `.block/config.json` 并建目录 |
+| `statu` | 仓库标志 + 块/槽使用率 + 文件数/目录数 + 导出根 |
+| `help [命令]` | 命令表；带命令名输出 `HELP_DETAILS` 中的详细说明 |
 | `delete` | `remove_all(".block")` 并复位全局状态 |
 
 **索引载入策略**：`require_loaded()` 检查 `isfind/iscomplete/hasload`，首次访问时解密 `idx`
@@ -109,6 +129,7 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 ## 6. 已知限制
 
 - 无密码仓库使用内置固定密钥，**只混淆不保密**
+- 空目录无法保留（索引只记录文件，目录由路径隐式存在）
 - 索引整体在内存中，文件数量极大时 `save_index` 会变慢
 - 数据区只追加不压缩，删除后空间靠位图复用
 - 无并发控制：同一仓库被两个进程同时写入会互相覆盖
@@ -117,10 +138,14 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 
 ## 7. 测试
 
-`tests/test.ps1` 覆盖 38 项断言：初始化、8 种尺寸的存取往返（0/1/511/512/513/4096/4097/1 MiB）、
-重复添加、缺失文件、删除、锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库。
+`tests/test.ps1` 覆盖 53 项断言：初始化、8 种尺寸的存取往返（0/1/511/512/513/4096/4097/1 MiB）、
+重复添加、缺失文件、删除、锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库，
+以及**内部路径与目录树**：整目录导入、显式路径导入、尾部斜杠入目录、目录导出（指定/默认根）、
+`out` 配置与环境变量优先级、`rm` 目录需 `-r`、路径穿越（`..`）拒绝。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep
 ```
+
+> 注意：所有 `.ps1` 文件需保存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会按 GBK 解析中文。
