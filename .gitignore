@@ -1,13 +1,74 @@
+# ---------- Build output ----------
 build/
 out/
+bin/
+obj/
 cmake-build-*/
-ai.md
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake.stamp
+compile_commands.json
+CMakeUserPresets.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# ---------- Compiler / linker artifacts ----------
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.iobj
+*.ipdb
+*.res
+*.tlog
+*.lastbuildstate
+*.manifest
+
+# ---------- MSVC / Visual Studio ----------
+.vs/
+x64/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+*.sln
+*.vcxproj
+*.vcxproj.*
+*.user
+*.suo
+
+# ---------- IDE / editor ----------
 .vscode/
 .idea/
+.clangd/
+.cache/
 *.swp
+*.swo
+*~
+
+# ---------- Runtime repository data (`init` creates .block/ in cwd) ----------
+.block/
+tests/_run/
+
+# ---------- Portable toolchain (downloaded by scripts/, ~1.5 GB) ----------
+tools/
+
+# ---------- Local scratch / OS files ----------
 ai.md
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Python ----------
+__pycache__/
+*.pyc

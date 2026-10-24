@@ -1,11 +1,27 @@
 #pragma once
-#include "types.h"
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+#include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 #include "json.h"
-using json = nlohmann::json;
-namespace fs = std::filesystem;
+#include "types.h"
+
+// 仓库/索引
 bool check_dir();
-Result add_file(std::string in_file_name /*内部名称*/ , std::string out_file_name); // 添加文件
+bool load_index(const U8list& key);
+bool save_index(const U8list& key);
+U8list RepoKey(const U8list& key);
+
+// 文件操作
+Result add_file(const std::string& src, const std::string& name, const U8list& key);
+Result get_file(const std::string& name, const std::string& dst, const U8list& key);
+Result remove_file(const std::string& name, const U8list& key);
+bool list_files(std::vector<std::pair<std::string, std::uint64_t>>& out);
+
+struct StoreStats {
+    std::uint64_t blocks = 0;
+    std::uint64_t blocks_used = 0;
+    std::uint64_t slots = 0;
+    std::uint64_t slots_used = 0;
+};
+StoreStats stats();

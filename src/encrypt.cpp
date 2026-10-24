@@ -2,17 +2,20 @@
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
 #include "encrypt.h"
 #include "types.h"
 #include "json.h"
+
 U8list To32(const U8list& in) {
     U8list out(in.begin(), in.begin() + std::min<size_t>(in.size(), 32));
     out.resize(32, 0);
     return out;
 }
+
 std::string Base64Encode(const std::vector<uint8_t>& data) {
     if (data.empty()) return {};
 
@@ -28,6 +31,7 @@ std::string Base64Encode(const std::vector<uint8_t>& data) {
     out.resize(static_cast<size_t>(n));
     return out;
 }
+
 U8list Sha256(const U8list& data) {
     U8list out(32);
     unsigned int len = 0;
@@ -54,6 +58,22 @@ U8list SlowHash(const U8list& data) {
     }
     return out;
 }
+
+U8list DeriveKey(const U8list& password, const U8list& salt) {
+    U8list joined = password;
+    joined.insert(joined.end(), salt.begin(), salt.end());
+    return SlowHash(joined);
+}
+
+U8list SubKey(const U8list& master, uint8_t domain, uint64_t id) {
+    U8list buf = master;
+    buf.push_back(domain);
+    for (int i = 7; i >= 0; --i) {
+        buf.push_back(static_cast<uint8_t>((id >> (8 * i)) & 0xFF));
+    }
+    return Sha256(buf);
+}
+
 U8list RandomBytes(size_t n) {
     U8list out(n);
     if (RAND_bytes(out.data(), static_cast<int>(n)) != 1) {
@@ -62,15 +82,9 @@ U8list RandomBytes(size_t n) {
     return out;
 }
 
-U8list encrypt_json(const nlohmann::json& j,
-                                const std::vector<uint8_t>& key) {
-    std::string plain = j.dump();
-
-    uint8_t k[32];
-    unsigned int klen = 32;
-    if (EVP_Digest(key.data(), key.size(), k, &klen,
-                EVP_sha256(), nullptr) != 1)
-        return {};
+// AES-256-GCM 封装：nonce(12) ‖ ciphertext ‖ tag(16)
+U8list GcmSeal(const U8list& plain, const U8list& key) {
+    U8list k = Sha256(key);
 
     uint8_t nonce[12];
     if (RAND_bytes(nonce, 12) != 1) return {};
@@ -78,119 +92,73 @@ U8list encrypt_json(const nlohmann::json& j,
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return {};
 
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(),
-                        nullptr, nullptr, nullptr) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
-
-    if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, k, nonce) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
-
-    std::vector<uint8_t> cipher(plain.size() + 16);
+    U8list cipher(plain.size() + 16);
     int out_len = 0;
-
-    if (EVP_EncryptUpdate(ctx, cipher.data(), &out_len,
-                        reinterpret_cast<const unsigned char*>(plain.data()),
-                        (int)plain.size()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
-
     int final_len = 0;
-    if (EVP_EncryptFinal_ex(ctx, cipher.data() + out_len, &final_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
+    uint8_t tag[16];
+    bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
+              EVP_EncryptInit_ex(ctx, nullptr, nullptr, k.data(), nonce) == 1 &&
+              EVP_EncryptUpdate(ctx, cipher.data(), &out_len, plain.data(),
+                                static_cast<int>(plain.size())) == 1 &&
+              EVP_EncryptFinal_ex(ctx, cipher.data() + out_len, &final_len) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok) return {};
 
     out_len += final_len;
-    cipher.resize(out_len);
+    cipher.resize(static_cast<size_t>(out_len));
 
-    uint8_t tag[16];
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return {};
-    }
-
-    EVP_CIPHER_CTX_free(ctx);
-
-    std::vector<uint8_t> out;
+    U8list out;
     out.reserve(12 + cipher.size() + 16);
-    out.insert(out.end(), nonce,          nonce + 12);
+    out.insert(out.end(), nonce, nonce + 12);
     out.insert(out.end(), cipher.begin(), cipher.end());
-    out.insert(out.end(), tag,            tag + 16);
+    out.insert(out.end(), tag, tag + 16);
     return out;
 }
 
+bool GcmOpen(const U8list& sealed, const U8list& key, U8list& plain) {
+    if (sealed.size() < 12 + 16) return false;
 
-nlohmann::json decrypt_json(const std::vector<uint8_t>& data,
-                            const std::vector<uint8_t>& key) {
-    if (data.size() < 12 + 16) return nullptr;
+    const uint8_t* nonce = sealed.data();
+    const uint8_t* ct = sealed.data() + 12;
+    size_t ct_len = sealed.size() - 12 - 16;
+    const uint8_t* tag = sealed.data() + 12 + ct_len;
 
-    const uint8_t* nonce = data.data();
-    const uint8_t* ct    = data.data() + 12;
-    size_t ct_len        = data.size() - 12 - 16;
-    const uint8_t* tag   = data.data() + 12 + ct_len;
-
-    uint8_t k[32];
-    unsigned int klen = 32;
-    if (EVP_Digest(key.data(), key.size(), k, &klen,
-                   EVP_sha256(), nullptr) != 1)
-        return nullptr;
+    U8list k = Sha256(key);
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return nullptr;
+    if (!ctx) return false;
 
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(),
-                           nullptr, nullptr, nullptr) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, k, nonce) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
-    }
-
-    std::string plain(ct_len, '\0');
+    plain.assign(ct_len, 0);
     int out_len = 0;
-
-    if (EVP_DecryptUpdate(ctx,
-                          reinterpret_cast<unsigned char*>(plain.data()),
-                          &out_len, ct, (int)ct_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void*)tag) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
-    }
-
     int final_len = 0;
-    if (EVP_DecryptFinal_ex(ctx,
-                            reinterpret_cast<unsigned char*>(plain.data()) + out_len,
-                            &final_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return nullptr;
+    bool ok = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
+              EVP_DecryptInit_ex(ctx, nullptr, nullptr, k.data(), nonce) == 1 &&
+              EVP_DecryptUpdate(ctx, plain.data(), &out_len, ct,
+                                static_cast<int>(ct_len)) == 1 &&
+              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t*>(tag)) == 1 &&
+              EVP_DecryptFinal_ex(ctx, plain.data() + out_len, &final_len) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok) {
+        plain.clear();
+        return false;
     }
 
     out_len += final_len;
-    plain.resize(out_len);
+    plain.resize(static_cast<size_t>(out_len));
+    return true;
+}
 
-    EVP_CIPHER_CTX_free(ctx);
+U8list encrypt_json(const nlohmann::json& j, const std::vector<uint8_t>& key) {
+    const std::string text = j.dump();
+    return GcmSeal(U8list(text.begin(), text.end()), key);
+}
 
-    return nlohmann::json::parse(plain, nullptr, false);
+nlohmann::json decrypt_json(const std::vector<uint8_t>& data, const std::vector<uint8_t>& key) {
+    U8list plain;
+    if (!GcmOpen(data, key, plain)) return nullptr;
+    std::string text(plain.begin(), plain.end());
+    return nlohmann::json::parse(text, nullptr, false);
 }

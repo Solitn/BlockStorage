@@ -1,7 +1,8 @@
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
-#include <cstdint>
+
 #include "command.h"
 #include "main.h"
 #include "types.h"
@@ -10,25 +11,29 @@
 
 Status res_statu;
 json files;
+
 int main(int argc, char* argv[]) {
-    std::string input;
     Args args(argv + 1, argv + argc);
     cmd_prepare(args);
+
+    std::string input;
     while (true) {
-        std::cout << "BlockStorage> ";
-        std::getline(std::cin, input);
-        if (input == "exit") {
+        std::cout << "BlockStorage> " << std::flush;
+        if (!std::getline(std::cin, input)) {
+            std::cout << std::endl;
+            break;  // EOF (Ctrl+Z / redirected input)
+        }
+        if (input == "exit" || input == "quit") {
             break;
         }
-        else{
-            Result re = command(input);
-            if (re.status == false) {
-                std::cout << "Error: " << re.message << std::endl;
-            }else{
-                if (re.message != "") {
-                    std::cout << re.message << std::endl;
-                }
-            }
+        if (input.empty()) {
+            continue;
+        }
+        Result re = command(input);
+        if (!re.status) {
+            std::cout << "Error: " << re.message << std::endl;
+        } else if (!re.message.empty()) {
+            std::cout << re.message << std::endl;
         }
     }
     return 0;
