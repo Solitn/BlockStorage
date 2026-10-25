@@ -49,88 +49,91 @@ Result require_loaded() {
 }  // namespace
 
 const std::map<std::string, CommandEntry> COMMANDS = {
-    {"init",   {cmd_init,   "init [-p<pwd>] [-s<salt>]        create a repository (optionally encrypted)"}},
-    {"load",   {cmd_load,   "load -p<pwd>                     unlock the repository"}},
-    {"add",    {cmd_add,    "add <源> [内路径] [-r]            add a file, or a folder (keeps subdirs)"}},
-    {"import", {cmd_import, "import <目录> [内路径]            mirror a folder: all files + dirs (incl. empty)"}},
-    {"get",    {cmd_get,    "get <内路径> [目标]               extract a file, a folder or the whole repo"}},
-    {"ls",     {cmd_ls,     "ls [内路径] [-r]                  list entries (tree with -r)"}},
-    {"rm",     {cmd_rm,     "rm <内路径> [-r]                  remove a file, or a folder with -r"}},
-    {"out",    {cmd_out,    "out [路径]                        show / set default extract root"}},
-    {"statu",  {cmd_statu,  "statu                            show repository status"}},
-    {"delete", {cmd_delete, "delete                           delete the whole repository"}},
-    {"help",   {cmd_help,   "help [命令]                       show help (per-command details)"}}
+    {"init",   {cmd_init,   "init [-p<pwd>] [-s<salt>]      create a repository (optionally encrypted)"}},
+    {"load",   {cmd_load,   "load -p<pwd>                   unlock the repository"}},
+    {"add",    {cmd_add,    "add <src> [path] [-r]          add a file or a folder (keeps subfolders)"}},
+    {"import", {cmd_import, "import <dir> [path]            mirror a folder: files + dirs (incl. empty)"}},
+    {"get",    {cmd_get,    "get <path> [target]            extract a file, a folder or the whole repo"}},
+    {"ls",     {cmd_ls,     "ls [path] [-r]                 list entries (tree with -r)"}},
+    {"rm",     {cmd_rm,     "rm <path> [-r]                 remove a file, or a folder with -r"}},
+    {"out",    {cmd_out,    "out [path]                     show / set the default extract root"}},
+    {"statu",  {cmd_statu,  "statu                          show repository status"}},
+    {"delete", {cmd_delete, "delete                         delete the whole repository"}},
+    {"help",   {cmd_help,   "help [command]                 show help (per-command details)"}}
 };
 
-// help <命令> 的详细说明
+// Per-command detailed help
 const std::map<std::string, std::string> HELP_DETAILS = {
     {"init",
      "init [-p<pwd>] [-s<salt>]\n"
-     "  在当前目录创建 .block/ 仓库。\n"
-     "  -p<pwd>   用密码加密（PBKDF2-HMAC-SHA256, 600000 轮）\n"
-     "  -s<salt>  指定盐（默认随机 32 字节）\n"
-     "  不带 -p 时为无密码仓库：仅混淆，不保密。"},
+     "  Create a .block/ repository in the current directory.\n"
+     "  -p<pwd>   encrypt with a password (PBKDF2-HMAC-SHA256, 600000 rounds)\n"
+     "  -s<salt>  provide a salt (default: random 32 bytes)\n"
+     "  Without -p the repository is unencrypted: obfuscation only, no confidentiality."},
     {"load",
      "load -p<pwd>\n"
-     "  校验密码并解密索引。每次启动进程后都要先 load（无密码仓库除外）。\n"
-     "  错误密码会提示 Incorrect password。"},
+     "  Verify the password and decrypt the index. Required after every start\n"
+     "  (except for keyless repositories). A wrong password reports \"Incorrect password\"."},
     {"add",
-     "add <src> [内路径] [-r]\n"
-     "  <src> 是文件时：加入单个文件。\n"
-     "    省略内路径      -> /<文件名>\n"
-     "    内路径以 / 结尾 -> 放入该目录，如 add a.txt /docs/\n"
-     "    否则            -> 作为完整内部路径，如 add a.txt /docs/a.txt\n"
-     "  <src> 是文件夹时：递归导入其下所有文件与子目录（空目录也会保留）。\n"
-     "    省略内路径      -> /<文件夹名>/...\n"
-     "    指定内路径      -> /backup/proj/...（保留子目录结构）\n"
-     "  例：add D:\\proj /backup/proj        # D:\\proj 整棵树 -> /backup/proj/..."},
+     "add <src> [path] [-r]\n"
+     "  <src> is a file:\n"
+     "    path omitted      -> /<filename>\n"
+     "    path ends with /  -> put into that folder, e.g. add a.txt /docs/\n"
+     "    otherwise         -> use as the full internal path, e.g. add a.txt /docs/a.txt\n"
+     "  <src> is a folder (or -r is given): import all files and subfolders\n"
+     "  recursively, empty folders included.\n"
+     "    path omitted      -> /<foldername>/...\n"
+     "    path given        -> /backup/proj/... (subfolder structure is kept)\n"
+     "  Example: add D:\\proj /backup/proj"},
     {"import",
-     "import <目录> [内路径]\n"
-     "  把一个本地目录完整镜像进仓库：其下所有文件 + 所有子目录（含空目录）。\n"
-     "  与 add <目录> 行为一致；单文件请用 add。\n"
-     "  省略 [内路径] -> /<目录名>/...\n"
-     "  已存在的路径会跳过并计入 skipped，不会覆盖。\n"
-     "  例：import D:\\photos /backup/photos-2026\n"
-     "      import D:\\empty-dir /templates/empty"},
+     "import <dir> [path]\n"
+     "  Mirror a local directory into the repository: every file and every\n"
+     "  subfolder, including empty ones.\n"
+     "  Same behaviour as 'add <dir>'; use 'add' for a single file.\n"
+     "  path omitted -> /<dirname>/...\n"
+     "  Any duplicate or conflicting path aborts the whole import (nothing is written).\n"
+     "  Example: import D:\\photos /backup/photos-2026"},
     {"get",
-     "get <内路径> [目标]\n"
-     "  精确命中文件：导出该文件。\n"
-     "    [目标] 省略 -> <out 根目录>/<内路径>\n"
-     "    [目标] 是目录 -> <目标>/<文件名>\n"
-     "    [目标] 是路径 -> 直接写到该路径\n"
-     "  精确命中目录：创建该目录（空目录也能还原）。\n"
-     "  前缀命中目录：导出整棵子树（保留目录结构，含空目录）。\n"
-     "    省略 [目标] -> <out 根目录>/<内路径>\n"
-     "  例：get /docs                 -> 导出 /docs 下所有文件\n"
-     "      get /docs D:\\restore     -> 导出到 D:\\restore/<相对路径>\n"
-     "      get /                    -> 导出整个仓库"},
+     "get <path> [target]\n"
+     "  Exact file: extract that file.\n"
+     "    target omitted   -> <out root>/<internal path>\n"
+     "    target is a dir  -> <target>/<filename>\n"
+     "    target is a path -> write to that path\n"
+     "  Folder (exact or prefix match): export the whole subtree, including\n"
+     "  empty folders and keeping the structure.\n"
+     "    target omitted   -> <out root>/<internal path>\n"
+     "  Examples: get /docs                export every file under /docs\n"
+     "            get /docs D:\\restore     export to D:\\restore/<relative path>\n"
+     "            get /                    export the whole repository"},
     {"ls",
-     "ls [内路径] [-r]\n"
-     "  不带参数：列出仓库根目录的直接子项（目录带 / 后缀）。\n"
-     "  带内路径：列出该目录下的直接子项。\n"
-     "  -r：递归列出全部条目（含目录）。\n"
-     "  例：ls /            ls /docs -r"},
+     "ls [path] [-r]\n"
+     "  No arguments: list direct children of the repository root (folders end with /).\n"
+     "  With a path: list direct children of that folder.\n"
+     "  -r: list every entry recursively (folders included).\n"
+     "  Examples: ls /            ls /docs -r"},
     {"rm",
-     "rm <内路径> [-r]\n"
-     "  删除单个文件；目录（含其下全部条目）需要 -r。\n"
-     "  删除会回收块位图并更新索引。\n"
-     "  例：rm /docs/a.txt        rm /docs -r"},
+     "rm <path> [-r]\n"
+     "  Remove a single file; folders (and everything under them) require -r.\n"
+     "  Blocks are returned to the bitmap and the index is rewritten.\n"
+     "  Examples: rm /docs/a.txt        rm /docs -r"},
     {"out",
-     "out [路径]\n"
-     "  不带参数：显示当前默认导出根目录。\n"
-     "  带路径：设置为该目录并写入 .block/config.json。\n"
-     "  优先级：环境变量 BLOCKSTORAGE_OUT > .block/config.json > C:\\BlockStorage\\extract\n"
-     "  例：out D:\\restore       out"},
+     "out [path]\n"
+     "  No arguments: show the current default extract root and where it comes from.\n"
+     "  With a path: set it and store it in .block/config.json.\n"
+     "  Priority: BLOCKSTORAGE_OUT > .block/config.json > <cwd>\\extract\n"
+     "  Examples: out D:\\restore       out"},
     {"statu",
      "statu\n"
-     "  显示仓库标志（isfind/iscomplete/haskey/hasload）、256 KiB 大块与 4 KiB 小块使用率、\n"
-     "  内联文件数、文件/目录数、默认导出根目录。"},
+     "  Show repository flags (isfind/iscomplete/haskey/hasload), usage of 256 KiB\n"
+     "  big blocks and 4 KiB small blocks, inline file count, file/folder counts and\n"
+     "  the default extract root."},
     {"delete",
      "delete\n"
-     "  删除当前目录下的整个 .block/ 仓库（不可恢复）。"},
+     "  Delete the whole .block/ repository in the current directory (irreversible)."},
     {"help",
-     "help [命令]\n"
-     "  不带参数列出所有命令；带命令名显示该命令的详细用法与原理解释。"}
+     "help [command]\n"
+     "  Without arguments: list every command.\n"
+     "  With a command name: show detailed usage for that command."}
 };
 
 Result getStatu(const Args& args) {
@@ -275,13 +278,13 @@ Result cmd_help(const Args& args) {
         std::cout << it->second << std::endl;
         return {true, ""};
     }
-    std::cout << "Available commands (help <命令> 查看详细用法):" << std::endl;
+    std::cout << "Available commands (use 'help <command>' for details):" << std::endl;
     for (const auto& [name, entry] : COMMANDS) {
         std::cout << "  " << entry.desc << std::endl;
     }
-    std::cout << "\n内部路径：仓库内一律使用 / 分隔，例如 /docs/2024/a.txt\n"
-              << "  首次使用：init -p<密码>  ->  add <文件或文件夹>  ->  ls  ->  get <内部路径>\n"
-              << "  详细操作指南见仓库根目录 help.md" << std::endl;
+    std::cout << "\nInternal paths use '/' as separator, e.g. /docs/2024/a.txt\n"
+              << "  Quick start: init -p<pwd>  ->  add <file-or-folder>  ->  ls  ->  get <path>\n"
+              << "  Full guide: see help.md in the repository root" << std::endl;
     return {true, ""};
 }
 
@@ -385,7 +388,7 @@ Result cmd_init(const Args& args) {
 }
 
 Result cmd_add(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: add <source> [内路径] [-r]"};
+    if (args.size() < 2) return {false, "Usage: add <source> [path] [-r]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
 
@@ -402,10 +405,10 @@ Result cmd_add(const Args& args) {
         } else if (internal.empty()) {
             internal = args[i];
         } else {
-            return {false, "Too many arguments, usage: add <source> [内路径] [-r]"};
+            return {false, "Too many arguments, usage: add <source> [path] [-r]"};
         }
     }
-    if (src.empty()) return {false, "Usage: add <source> [内路径] [-r]"};
+    if (src.empty()) return {false, "Usage: add <source> [path] [-r]"};
 
     const fs::path src_path = PathFromUtf8(src);
     std::error_code ec;
@@ -418,13 +421,13 @@ Result cmd_add(const Args& args) {
         return add_tree(src, internal, res_statu.key, files, dirs, failed);
     }
     if (recursive) {
-        return {false, "-r 只能用于文件夹: " + src};
+        return {false, "-r can only be used with a folder: " + src};
     }
     return add_file(src, internal, res_statu.key);
 }
 
 Result cmd_import(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: import <目录> [内路径]"};
+    if (args.size() < 2) return {false, "Usage: import <dir> [path]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
 
@@ -437,15 +440,15 @@ Result cmd_import(const Args& args) {
         } else if (internal.empty()) {
             internal = args[i];
         } else {
-            return {false, "Too many arguments, usage: import <目录> [内路径]"};
+            return {false, "Too many arguments, usage: import <dir> [path]"};
         }
     }
-    if (src.empty()) return {false, "Usage: import <目录> [内路径]"};
+    if (src.empty()) return {false, "Usage: import <dir> [path]"};
 
     const fs::path src_path = PathFromUtf8(src);
     std::error_code ec;
     if (!fs::is_directory(src_path, ec)) {
-        return {false, "Not a directory: " + src + "（单文件请用 add）"};
+        return {false, "Not a directory: " + src + " (use 'add' for a single file)"};
     }
     if (internal.empty()) internal = "/" + PathToUtf8(src_path.filename());
 
@@ -456,7 +459,7 @@ Result cmd_import(const Args& args) {
 }
 
 Result cmd_get(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: get <内路径> [目标]"};
+    if (args.size() < 2) return {false, "Usage: get <path> [target]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
     const std::string dst = args.size() >= 3 ? args[2] : std::string();
@@ -464,7 +467,7 @@ Result cmd_get(const Args& args) {
 }
 
 Result cmd_rm(const Args& args) {
-    if (args.size() < 2) return {false, "Usage: rm <内路径> [-r]"};
+    if (args.size() < 2) return {false, "Usage: rm <path> [-r]"};
     Result pre = require_loaded();
     if (!pre.status) return pre;
     bool recursive = false;
@@ -475,10 +478,10 @@ Result cmd_rm(const Args& args) {
         } else if (target.empty()) {
             target = args[i];
         } else {
-            return {false, "Too many arguments, usage: rm <内路径> [-r]"};
+            return {false, "Too many arguments, usage: rm <path> [-r]"};
         }
     }
-    if (target.empty()) return {false, "Usage: rm <内路径> [-r]"};
+    if (target.empty()) return {false, "Usage: rm <path> [-r]"};
     return remove_file(target, res_statu.key, recursive);
 }
 
@@ -494,7 +497,7 @@ Result cmd_ls(const Args& args) {
         } else if (prefix.empty()) {
             prefix = args[i];
         } else {
-            return {false, "Too many arguments, usage: ls [内路径] [-r]"};
+            return {false, "Too many arguments, usage: ls [path] [-r]"};
         }
     }
 

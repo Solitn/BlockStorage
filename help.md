@@ -271,11 +271,11 @@ BlockStorage.exe
 | `Repository is locked, run 'load -p<password>'` | 先解锁 |
 | `Incorrect password` | 密码错；无密码仓库不适用 |
 | `Repository incomplete: some files are missing` | `.block/` 下 6 个核心文件缺失 |
-| `Path already exists in repository: /x` | 内部路径重名，换个名字或先 `rm` |
+| `Duplicate path: /x conflicts with existing /y` | 内部路径重名，换个名字或先 `rm` |
 | `Invalid internal path` | 含 `..`、盘符或空段 |
 | `'...' is a directory (N entries), use rm -r` | 删目录要 `-r` |
 | `No such file or directory in repository: /x` | 不存在（用 `ls / -r` 确认拼写） |
-| `Not a directory: <路径>（单文件请用 add）` | `import` 只接受目录 |
+| `Not a directory: <path> (use add for a single file)` | `import` 只接受目录 |
 | `数据变问号（?）` | 管道编码问题：cmd 用 `chcp 65001`，PowerShell 设 `$OutputEncoding` |
 | `Data authentication failed` | 块密文被改动或密钥不符 |
 | `Checksum mismatch` | 还原后 SHA-256 不符（数据损坏） |

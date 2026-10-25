@@ -131,14 +131,14 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 |---|---|
 | `init [-p<pwd>] [-s<salt>]` | `create_area()` 建 6 个文件；带 `-p` 时写 `key`，并把派生密钥留在内存 |
 | `load -p<pwd>` | 校验 `SHA256(DeriveKey(pwd,salt))`，成功后 `load_index()` 解密 `idx` |
-| `add <src> [内路径] [-r]` | 文件→`add_file`（尾随 `/` 视为目录，取源文件名）；目录→`add_tree`（含空目录） |
-| `import <目录> [内路径]` | 同 `add_tree`，但强制参数为目录；输出 `Imported N file(s), M dir(s)` |
-| `get <内路径> [目标]` | 精确命中文件→写文件；目录（精确或前缀）→整棵子树，含空目录；无目标时落 `<out 根>/<内部路径>` |
-| `ls [内路径] [-r]` | `list_files()`：非递归折叠为直接子项，`-r` 列全部条目（含 `dir` 行） |
-| `rm <内路径> [-r]` | 精确命中文件→单文件；目录（自身 + 子孙）必须 `-r`，批量清位图后统一写索引 |
-| `out [路径]` | 无参显示（含来源）；有参写入 `.block/config.json` 并建目录 |
+| `add <src> [path] [-r]` | 文件→`add_file`（尾随 `/` 视为目录，取源文件名）；目录→`add_tree`（含空目录） |
+| `import <dir> [path]` | 同 `add_tree`，但强制参数为目录；输出 `Imported N file(s), M dir(s)` |
+| `get <path> [target]` | 精确命中文件→写文件；目录（精确或前缀）→整棵子树，含空目录；无目标时落 `<out 根>/<内部路径>` |
+| `ls [path] [-r]` | `list_files()`：非递归折叠为直接子项，`-r` 列全部条目（含 `dir` 行） |
+| `rm <path> [-r]` | 精确命中文件→单文件；目录（自身 + 子孙）必须 `-r`，批量清位图后统一写索引 |
+| `out [path]` | 无参显示（含来源）；有参写入 `.block/config.json` 并建目录 |
 | `statu` | 仓库标志 + 块/槽使用率 + 文件数/目录数 + 导出根 |
-| `help [命令]` | 命令表；带命令名输出 `HELP_DETAILS` 中的详细说明 |
+| `help [command]` | 命令表；带命令名输出 `HELP_DETAILS` 中的详细说明 |
 | `delete` | `remove_all(".block")` 并复位全局状态 |
 
 **索引载入策略**：`require_loaded()` 检查 `isfind/iscomplete/hasload`，首次访问时解密 `idx`

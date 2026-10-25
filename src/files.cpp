@@ -557,7 +557,7 @@ Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
             detail += conflicts[i];
         }
         if (conflicts.size() > show) {
-            detail += "; ... 共 " + std::to_string(conflicts.size()) + " 处";
+            detail += "; ... and " + std::to_string(conflicts.size() - show) + " more";
         }
         return {false, "Import aborted, " + std::to_string(conflicts.size()) +
                            " duplicate/conflicting path(s): " + detail};
