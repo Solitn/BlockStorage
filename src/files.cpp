@@ -47,6 +47,9 @@ struct Format {
 
 Format g_format{};
 
+// 前置声明（check_path 会用到）
+std::vector<std::string> split_path(const std::string& path);
+
 const Format& NewFormat() {
     static const Format f;
     return f;
@@ -77,6 +80,105 @@ bool ensure_dir_entry(json& idx, const std::string& path) {
     entry["kind"] = "dir";
     idx[path] = entry;
     return true;
+}
+
+// 内部路径的大小写无关比较键（Windows 路径大小写不敏感）
+std::string lower_path(const std::string& s) {
+    std::string r = s;
+    for (char& c : r) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return r;
+}
+
+struct PathCheck {
+    std::string canonical;  // 父目录沿用仓库中已存在的大小写
+    std::string conflict;   // 非空表示冲突的既有路径
+};
+
+// 检查目标路径是否与仓库已有条目冲突（大小写不敏感）
+// want_dir = true 时，已存在的同名目录视为可复用（目录可合并），不算冲突
+PathCheck check_path(const json& idx, const std::string& name, bool want_dir) {
+    PathCheck out;
+    const std::string lname = lower_path(name);
+
+    // 1) 精确同名（大小写不敏感）
+    for (auto it = idx.begin(); it != idx.end(); ++it) {
+        if (lower_path(it.key()) != lname) continue;
+        const bool existing_is_dir = it.value().value("kind", "") == "dir";
+        if (want_dir && existing_is_dir) {
+            out.canonical = it.key();  // 复用已有目录（保留原大小写）
+            return out;
+        }
+        out.conflict = it.key();
+        return out;
+    }
+    // 2) 同名目录已存在（有子孙条目）
+    const std::string prefix = lname + "/";
+    for (auto it = idx.begin(); it != idx.end(); ++it) {
+        if (lower_path(it.key()).rfind(prefix, 0) == 0) {
+            if (want_dir) {
+                out.canonical = it.key().substr(0, it.key().find('/', 1));
+                // 回退到通用规范化流程，保证父级大小写一致
+                out.canonical.clear();
+                break;
+            }
+            out.conflict = it.key();
+            return out;
+        }
+    }
+    // 3) 某一级父路径是文件；同时让父目录沿用既有写法
+    const std::vector<std::string> segs = split_path(name);
+    if (segs.empty()) {
+        out.conflict = "/";
+        return out;
+    }
+    std::string canon;
+    std::string acc;
+    for (std::size_t i = 0; i + 1 < segs.size(); ++i) {
+        acc += "/" + segs[i];
+        const std::string lacc = lower_path(acc);
+        std::string match;
+        for (auto it = idx.begin(); it != idx.end(); ++it) {
+            if (lower_path(it.key()) == lacc) {
+                match = it.key();
+                break;
+            }
+        }
+        if (!match.empty()) {
+            if (idx[match].value("kind", "") != "dir") {
+                out.conflict = match;
+                return out;
+            }
+            canon = match;  // match 已是完整前缀，直接替换
+        } else {
+            canon += "/" + segs[i];
+        }
+    }
+    canon += "/" + segs.back();
+
+    // 4) 规范化后可能仍与既有目录同名（大小写差异）
+    const std::string lcanon = lower_path(canon);
+    const std::string canon_prefix = lcanon + "/";
+    for (auto it = idx.begin(); it != idx.end(); ++it) {
+        const std::string lkey = lower_path(it.key());
+        if (lkey == lcanon) {
+            if (want_dir && it.value().value("kind", "") == "dir") {
+                out.canonical = it.key();
+                return out;
+            }
+            out.conflict = it.key();
+            return out;
+        }
+        if (lkey.rfind(canon_prefix, 0) == 0) {
+            if (want_dir) continue;  // 目录已存在且有子孙：允许合并
+            out.conflict = it.key();
+            return out;
+        }
+    }
+
+    out.canonical = canon;
+    return out;
 }
 
 // 为路径的每一级父目录建立条目
@@ -259,22 +361,11 @@ Result add_file(const std::string& src, const std::string& internal_in, const U8
     if (name == "/") return {false, "Internal path must not be the repository root"};
 
     json& idx = index_root();
-    if (idx.contains(name)) return {false, "Path already exists in repository: " + name};
-    // 同名目录已存在（有子孙条目）
-    const std::string as_prefix = name + "/";
-    for (auto it = idx.begin(); it != idx.end(); ++it) {
-        if (it.key().rfind(as_prefix, 0) == 0) {
-            return {false, "Path exists as a directory in repository: " + name};
-        }
+    const PathCheck chk = check_path(idx, name, false);
+    if (!chk.conflict.empty()) {
+        return {false, "Duplicate path: " + name + " conflicts with existing " + chk.conflict};
     }
-    // 某一级父路径是文件
-    for (std::size_t i = 1; i < name.size(); ++i) {
-        if (name[i] != '/') continue;
-        auto anc = idx.find(name.substr(0, i));
-        if (anc != idx.end() && anc->value("kind", "") != "dir") {
-            return {false, "Parent path is a file: " + name.substr(0, i)};
-        }
-    }
+    name = chk.canonical;
     ensure_parent_dirs(idx, name);
 
     const store::Layout& L = store::layout();
@@ -384,11 +475,6 @@ Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
     if (prefix.empty()) return {false, "Invalid internal path"};
 
     json& idx = index_root();
-    // 导入根目录本身也要有条目（支持空目录）
-    if (prefix != "/") {
-        ensure_dir_entry(idx, prefix);
-        ++dirs_added;
-    }
 
     std::vector<fs::path> files;
     std::vector<fs::path> dirs;
@@ -419,28 +505,72 @@ Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
 
     const std::string base = (prefix == "/") ? "" : prefix;
 
-    // 先建目录条目（含空目录）
+    // ---- 预扫描：任何重名/父子冲突都整批中止（不做半截导入）----
+    std::vector<std::pair<fs::path, std::string>> file_plan;
+    std::vector<std::string> dir_plan;
+    std::vector<std::string> conflicts;
+
+    if (prefix != "/") {
+        PathCheck chk = check_path(idx, prefix, true);
+        if (!chk.conflict.empty()) {
+            conflicts.push_back(prefix + " (conflicts with " + chk.conflict + ")");
+        } else {
+            dir_plan.push_back(chk.canonical);
+        }
+    }
+
     for (const fs::path& d : dirs) {
         std::string rel;
         if (!relative_of(d, rel)) {
             ++failed;
             continue;
         }
-        if (ensure_dir_entry(idx, base + "/" + rel)) {
-            ++dirs_added;
+        const std::string target = (base.empty() ? "" : base) + "/" + rel;
+        PathCheck chk = check_path(idx, target, true);
+        if (!chk.conflict.empty()) {
+            conflicts.push_back(target + " (conflicts with " + chk.conflict + ")");
         } else {
-            ++failed;
+            dir_plan.push_back(chk.canonical);
         }
     }
 
-    std::string first_error;
     for (const fs::path& p : files) {
         std::string rel;
         if (!relative_of(p, rel)) {
             ++failed;
             continue;
         }
-        Result r = add_file(PathToUtf8(p), base + "/" + rel, key);
+        const std::string target = (base.empty() ? "" : base) + "/" + rel;
+        PathCheck chk = check_path(idx, target, false);
+        if (!chk.conflict.empty()) {
+            conflicts.push_back(target + " (conflicts with " + chk.conflict + ")");
+        } else {
+            file_plan.emplace_back(p, chk.canonical);
+        }
+    }
+
+    if (!conflicts.empty()) {
+        std::string detail;
+        const std::size_t show = std::min<std::size_t>(conflicts.size(), 3);
+        for (std::size_t i = 0; i < show; ++i) {
+            if (i) detail += "; ";
+            detail += conflicts[i];
+        }
+        if (conflicts.size() > show) {
+            detail += "; ... 共 " + std::to_string(conflicts.size()) + " 处";
+        }
+        return {false, "Import aborted, " + std::to_string(conflicts.size()) +
+                           " duplicate/conflicting path(s): " + detail};
+    }
+
+    // ---- 执行：先目录，后文件 ----
+    for (const std::string& d : dir_plan) {
+        if (ensure_dir_entry(idx, d)) ++dirs_added;
+    }
+
+    std::string first_error;
+    for (const auto& item : file_plan) {
+        Result r = add_file(PathToUtf8(item.first), item.second, key);
         if (r.status) {
             ++files_added;
         } else {

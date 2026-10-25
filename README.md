@@ -74,13 +74,20 @@ get /backup/photos D:\restore    -> D:\restore\...
 
 路径支持中文（内部统一 UTF-8）。
 
+### 重名规则（大小写不敏感）
+
+- 同一路径只能存在一个条目：`/Case/File.txt` 与 `/case/file.txt`、`/CASE/FILE.TXT` 视为同一个名字，重复写入会被拒绝
+- 目标路径已被**目录**占用时，不能再当文件写入；反之亦然
+- 父目录已存在但大小写不同时，会自动沿用仓库里的写法（`/Docs` 下再写 `/docs/a.txt` → 落到 `/Docs/a.txt`）
+- `import` 采用**整批拦截**：预扫描发现任何冲突就整体中止，一条都不写（错误信息会列出前 3 处冲突）
+
 ### 默认导出根目录
 
 `get` 不带目标时写入 `<out 根>/<内部路径>`，优先级：
 
 1. 环境变量 `BLOCKSTORAGE_OUT`
 2. `.block/config.json` 的 `output_root`（由 `out <路径>` 写入）
-3. 内置默认 `C:\BlockStorage\extract`
+3. 内置默认 `<程序工作目录>\extract`（即仓库所在目录下的 `extract`）
 
 `scripts/env.ps1` 会把 `BLOCKSTORAGE_OUT` 指向仓库内 `out\extract`，方便开发测试。
 

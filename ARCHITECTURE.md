@@ -18,7 +18,7 @@ CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (�
 | 入口 | `src/main.cpp` | REPL、EOF/exit 处理、结果打印 |
 | 命令 | `src/command.cpp` | 命令表、参数解析、`help <cmd>` 详情、全部命令实现 |
 | 文件语义 | `src/files.cpp` | 内部路径归一化、目录树导入导出、分块与小文件分流、索引 JSON |
-| 配置 | `src/config.cpp` | 导出根目录：env `BLOCKSTORAGE_OUT` > `.block/config.json` > `C:\BlockStorage\extract` |
+| 配置 | `src/config.cpp` | 导出根目录：env `BLOCKSTORAGE_OUT` > `.block/config.json` > `<cwd>\extract` |
 | 存储 | `src/store.cpp` | 定长记录读写、位图分配、目录创建 |
 | 密码学 | `src/encrypt.cpp` | PBKDF2、SHA-256、AES-256-GCM、Base64、子密钥派生 |
 
@@ -79,7 +79,16 @@ CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (�
 | 删除 | `remove_file()` 精确命中文件→删单文件；目录（自身 + 全部子孙）需 `-r`，逐个清位图后统一写索引 |
 | 列表 | `list_files()` 非递归折叠为"直接子项"；递归列出全部条目（含 `dir` 行） |
 
-### 2.3 字符编码
+### 2.3 重名策略
+
+- 内部路径按**大小写不敏感**比较（Windows 语义）：`check_path()` 用 `lower_path()` 生成比较键
+- 冲突判定：同名文件已存在、同名目录已有子孙、父级是文件、目标名被目录占用 → 一律拒绝
+- `add` 单文件：返回 `Duplicate path: X conflicts with existing Y`
+- `add <目录>` / `import`：先全量预扫描（`dir_plan` / `file_plan`），任何冲突则**整批中止**，一条都不写
+- 目录可合并：目标目录已存在不算冲突；父目录大小写自动沿用仓库中已有写法
+- 编号冲突示例：已有 `/Docs/File.txt` 时，`/case/file.txt`、`/CASE/FILE.TXT` 都被拦截
+
+### 2.4 字符编码
 
 - 入口是 `wmain`：命令行参数 UTF-16 → UTF-8（`WideToUtf8`）
 - 所有本地路径一律 `PathFromUtf8()`（UTF-8 → 宽字符）后再交给 `std::filesystem`，中文路径可用
@@ -146,11 +155,12 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 
 ## 7. 测试
 
-`tests/test.ps1` 覆盖 **74 项断言**：初始化、8 种尺寸的存取往返、重复添加、缺失文件、删除、
+`tests/test.ps1` 覆盖 **84 项断言**：初始化、8 种尺寸的存取往返、重复添加、缺失文件、删除、
 锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库；内部路径与目录树（整目录导入、显式路径、
 尾斜杠入目录、目录导出、默认导出根、`out` 配置、`rm -r`、路径穿越拒绝）；`import` 含空目录镜像、
-目录条目、空目录还原、精确目录导出、中文路径往返、版本横幅；以及**三档存储边界**
-（1 KiB inline / 1025 B 4 KiB 块 / 256 KiB / 256 KiB+1 大块）。
+目录条目、空目录还原、精确目录导出、中文路径往返、版本横幅；三档存储边界
+（1 KiB inline / 1025 B 4 KiB 块 / 256 KiB / 256 KiB+1 大块）；以及**重名拦截**
+（大小写不敏感的重复文件、文件↔目录互占、`import` 整批中止）与默认导出根（工作区 `extract`）。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep

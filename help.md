@@ -72,7 +72,7 @@ BlockStorage> exit
 
 1. 环境变量 `BLOCKSTORAGE_OUT`
 2. 仓库内 `.block/config.json` 的 `output_root`
-3. 内置默认值 `C:\BlockStorage\extract`
+3. 内置默认值 `<工作目录>\extract`（仓库所在目录下的 `extract`）
 
 ---
 
@@ -117,9 +117,12 @@ add <源路径> [内部路径] [-r]
 
 要点：
 
-- 文件夹会**递归**导入其下所有文件与子目录，**空目录也会保留**（v1.0.0 起）
-- 同名内部路径已存在时整体拒绝：`Error: Path already exists in repository: /x/y`
-- 文件夹导入会输出 `Imported N file(s), M dir(s) into <路径>`，失败项计入 `skipped`
+- 文件夹会**递归**导入其下所有文件与子目录，**空目录也会保留**
+- **重名拦截**：同一路径只能存在一个条目，且**大小写不敏感**（`/a.txt` = `/A.TXT`）；
+  重名、或“目录↔文件”互相占用，都会被拒绝：
+  `Error: Duplicate path: /case/file.txt conflicts with existing /Case/File.txt`
+- 父目录大小写不同时会自动沿用仓库里的写法（`/Docs` 下写 `/docs/a.txt` → `/Docs/a.txt`）
+- 文件夹导入会输出 `Imported N file(s), M dir(s) into <路径>`
 - 单文件 ≤1 KiB 直接内联进索引；1 KiB~256 KiB 按 4 KiB 分块；更大按 256 KiB 分块
 
 ### 3.4 `import` — 完整镜像一个目录
@@ -138,7 +141,9 @@ import <本地目录> [内部路径]
 
 - 与 `add <目录>` 行为一致；区别只在语义：`import` 明确要求参数是目录，单文件请用 `add`
 - 输出形如 `Imported 128 file(s), 20 dir(s) into /backup/proj`
-- 已存在的路径会被跳过（计入 `skipped`），不会覆盖
+- **整批拦截**：导入前先预扫描，发现任何重名/冲突就整体中止，一条都不写：
+  `Error: Import aborted, 2 duplicate/conflicting path(s): /Imp/a.txt (conflicts with /Imp/a.txt); ...`
+- 目标目录已存在时允许合并（目录不是冲突），只有文件重名或“文件↔目录”互占才算冲突
 - 反向导出用 `get`，空目录会一并还原
 
 ### 3.5 `get` — 取出（反向）

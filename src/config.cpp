@@ -18,12 +18,17 @@ namespace fs = std::filesystem;
 
 namespace {
 
-const char* kDefaultRoot = "C:\\BlockStorage\\extract";
+const char* kExtractDirName = "extract";
 
 }  // namespace
 
+// 默认导出根 = 程序工作区（当前工作目录）下的 extract/
 std::string DefaultOutputRoot() {
-    return kDefaultRoot;
+    std::error_code ec;
+    fs::path cwd = fs::current_path(ec);
+    if (ec) return std::string(kExtractDirName);
+    cwd /= kExtractDirName;
+    return PathToUtf8(cwd);
 }
 
 std::string ConfigFilePath() {

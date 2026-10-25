@@ -102,7 +102,7 @@ foreach ($k in $sizes.Keys) {
 
 Write-Host "== duplicate / missing ==" -ForegroundColor Cyan
 $out = Run-Repo @('add src\one.bin', 'get nope.bin x.bin', 'rm nope.bin', 'exit')
-Check 'duplicate rejected' ($out -match 'already exists')
+Check 'duplicate rejected' ($out -match 'Duplicate path|already exists')
 Check 'missing get rejected' ($out -match 'No such file')
 Check 'missing rm rejected' ($out -match 'No such file')
 
@@ -214,6 +214,46 @@ Check 'rm -r removes subtree' ($out -match 'Removed \d+ entries under /archive')
 # 8) 非法内部路径
 $out = Run-Repo @("add $tree\a.txt /a/../b", 'exit')
 Check 'path traversal rejected' ($out -match 'Invalid internal path')
+
+Write-Host "== 重名拦截（大小写不敏感）==" -ForegroundColor Cyan
+$dup = Join-Path $Work 'dup'
+New-Item -ItemType Directory -Path (Join-Path $dup 'src') -Force | Out-Null
+New-Sample (Join-Path $dup 'src\x.txt') 30
+New-Sample (Join-Path $dup 'src\y.txt') 40
+
+$out = Run-Repo @("add $dup\src\x.txt /Case/File.txt",
+                  "add $dup\src\x.txt /case/file.txt",
+                  "add $dup\src\x.txt /CASE/FILE.TXT",
+                  "add $dup\src\y.txt /Case/File.txt",
+                  'ls /Case', 'exit')
+Check 'first add ok' ($out -match 'Added /Case/File\.txt')
+Check 'duplicate (same path, other case) blocked' ($out -match 'Duplicate path: /case/file\.txt conflicts with existing /Case/File\.txt'.Replace('\.txt','\.txt'))
+Check 'duplicate (upper case) blocked' ($out -match 'conflicts with existing /Case/File\.txt')
+Check 'file vs file duplicate blocked twice' (([regex]::Matches($out, 'Duplicate path:').Count) -eq 3)
+
+$impSrc = Join-Path $Work 'impsrc'
+New-Item -ItemType Directory -Path $impSrc -Force | Out-Null
+New-Sample (Join-Path $impSrc 'a.txt') 20
+New-Sample (Join-Path $impSrc 'b.txt') 21
+$out = Run-Repo @("import $impSrc /Imp", 'exit')
+Check 'first import ok' ($out -match 'Imported 2 file\(s\)')
+$out = Run-Repo @("import $impSrc /Imp", 'exit')
+Check 'import with conflicts aborted' ($out -match 'Import aborted, \d+ duplicate/conflicting path')
+$out = Run-Repo @('ls /Imp -r', 'exit')
+Check 'aborted import wrote nothing new' (([regex]::Matches($out, '/Imp/[ab]\.txt').Count) -eq 2)
+
+$out = Run-Repo @("add $dup\src\y.txt /Case", 'exit')
+Check 'adding file where dir exists blocked' ($out -match 'Duplicate path: /Case')
+
+Write-Host "== 默认导出根 = 程序工作区 ==" -ForegroundColor Cyan
+$defDir = Join-Path $Work 'defrepo'
+New-Item -ItemType Directory -Path $defDir -Force | Out-Null
+$saved2 = $env:BLOCKSTORAGE_OUT
+Remove-Item Env:\BLOCKSTORAGE_OUT -ErrorAction SilentlyContinue
+$out = Run-Repo -NoLoad -Dir $defDir @("init -p$Pwd0", 'out', 'exit')
+Check 'default root is cwd\extract' ($out -match 'defrepo\\extract')
+Check 'default source reported' ($out -match 'source\s*:\s*default')
+$env:BLOCKSTORAGE_OUT = $saved2
 
 Write-Host "== import（文件 + 目录，含空目录）==" -ForegroundColor Cyan
 $mirror = Join-Path $Work 'mirror'
