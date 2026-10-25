@@ -8,13 +8,21 @@
 
 namespace store {
 
-// 固定块布局：nonce(12) | ciphertext | tag(16)
-constexpr std::size_t kBlockSize = 4096;  // 大块载荷
-constexpr std::size_t kSmallSize = 512;   // 小文件槽载荷
-constexpr std::size_t kNonceSize = 12;
-constexpr std::size_t kTagSize   = 16;
-constexpr std::size_t kBlockRec  = kNonceSize + kBlockSize + kTagSize;  // 4124
-constexpr std::size_t kSmallRec  = kNonceSize + kSmallSize + kTagSize;  // 540
+// 固定记录布局：nonce(12) | ciphertext | tag(16)
+// 新格式（index v4）：大块 256 KiB 落在 data.blk，小块 4 KiB 落在 data.small
+constexpr std::size_t kTinySize   = 1024;             // ≤1 KiB：直接 base64 存索引
+constexpr std::size_t kLargeBlock = 256 * 1024;       // 大块载荷 256 KiB
+constexpr std::size_t kSmallBlock = 4096;             // 小块载荷 4 KiB
+constexpr std::size_t kNonceSize  = 12;
+constexpr std::size_t kTagSize    = 16;
+constexpr std::size_t kLargeRec   = kNonceSize + kLargeBlock + kTagSize;  // 262172
+constexpr std::size_t kSmallRec   = kNonceSize + kSmallBlock + kTagSize;  // 4124
+
+// 旧格式（index ≤ v3）：data.blk 4 KiB 记录，data.small 512 B 记录
+constexpr std::size_t kLegacyBlockSize = 4096;
+constexpr std::size_t kLegacySmallSize = 512;
+constexpr std::size_t kLegacyBlockRec  = kNonceSize + kLegacyBlockSize + kTagSize;  // 4124
+constexpr std::size_t kLegacySmallRec  = kNonceSize + kLegacySmallSize + kTagSize;  // 540
 
 struct Layout {
     std::string dir     = ".block";
@@ -22,8 +30,8 @@ struct Layout {
     std::string key     = ".block/key";
     std::string data    = ".block/data.blk";
     std::string bitmap  = ".block/bitmap";
-    std::string small_data  = ".block/data.small";
-    std::string small_bitmap= ".block/bitmap.small";
+    std::string small_data   = ".block/data.small";
+    std::string small_bitmap = ".block/bitmap.small";
 };
 
 const Layout& layout();

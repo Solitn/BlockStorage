@@ -27,28 +27,38 @@ CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (�
 ```
 .block/
 ├── key            salt(32) ‖ SHA256(派生密钥)(32)       明文，仅用于校验密码
-├── idx            AES-256-GCM 加密的索引 JSON
-├── data.blk       大块区：每块 4124 B = nonce(12) ‖ ct(4096) ‖ tag(16)
+├── idx            AES-256-GCM 加密的索引 JSON（含内联小文件）
+├── data.blk       大块区：262172 B = nonce(12) ‖ ct(256 KiB) ‖ tag(16)
 ├── bitmap         大块位图，1 bit/块
-├── data.small     小槽区：每槽 540 B = nonce(12) ‖ ct(512) ‖ tag(16)
-├── bitmap.small   小槽位图
+├── data.small     小块区：4124 B = nonce(12) ‖ ct(4 KiB) ‖ tag(16)
+├── bitmap.small   小块位图
 └── config.json    可选：{"output_root": "..."}（明文，非敏感）
 ```
 
-- **分流阈值**：`size ≤ 512` 走小槽，否则按 4096 B 分块（末块零填充，真实长度记在索引里）
+**三档分流**（`Format` 结构体统一控制，旧仓库按索引版本回退到旧尺寸）：
+
+| 文件大小 | kind | 存放 |
+|---|---|---|
+| ≤ 1 KiB | `inline` | base64 直接写进索引（索引本身 AES-GCM 加密） |
+| 1 KiB ~ 256 KiB | `small` | 4 KiB 分块 → `data.small` |
+| > 256 KiB | `blk` | 256 KiB 分块 → `data.blk` |
+
+- 末块零填充，真实长度记在索引 `size`
 - **分配**：`bitmap_first_free()` 找首个空位；位图不够长时按 `record_count()` 追加
 - **回收**：删除时清位图；数据区文件不收缩（后续分配会复用空洞）
+- **兼容**：索引 ≤ v3 的仓库沿用旧尺寸（data.blk 4124 B/块、data.small 540 B/块）
 
-索引（解密后，v3 起键为内部路径且含目录条目）：
+索引（解密后，v4 起键为内部路径且含目录条目）：
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "files": {
     "/docs":       {"kind": "dir"},
     "/docs/empty": {"kind": "dir"},
-    "/docs/a.bin": {"kind": "blk",   "size": 5000, "sha256": "b64", "blocks": [0, 3]},
-    "/docs/b.txt": {"kind": "small", "size": 40,   "sha256": "b64", "slot": 2}
+    "/docs/t.txt": {"kind": "inline", "size": 40,    "sha256": "b64", "data": "5Lit5paH"},
+    "/docs/a.bin": {"kind": "small",  "size": 100000, "sha256": "b64", "blocks": [0, 1, 2]},
+    "/docs/b.bin": {"kind": "blk",    "size": 1048576,"sha256": "b64", "blocks": [0, 1, 2, 3]}
   }
 }
 ```
@@ -125,19 +135,7 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 **索引载入策略**：`require_loaded()` 检查 `isfind/iscomplete/hasload`，首次访问时解密 `idx`
 （进程内缓存于全局 `files`，`g_index_loaded` 标记）。写入顺序为**先数据后索引**，`idx` 落盘成功才算提交。
 
-## 5. 运行时约束（重要）
-
-便携工具链（`tools/`，由 `scripts/` 下载，已 gitignore）有几个非标准点：
-
-1. **静态 CRT（/MT）**：从 VS 通道解包的 MSVC 包缺少 `msvcprt.lib` / `vcruntime.lib` 等 DLL 导入库，
-   因此 `CMakeLists.txt` 强制 `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`，并通过
-   `CMAKE_TRY_COMPILE_PLATFORM_VARIABLES` 传给编译器探测阶段（否则 try_compile 用 `/MDd` 失败）。
-2. **oldnames.lib**：Windows SDK 的 NuGet 包不含该库，`scripts/build.ps1` 用 `lib.exe /def:` 生成空壳。
-3. **rc.exe / mt.exe**：清单嵌入需要资源编译器，来自 `microsoft.windows.sdk.buildtools` 包，放在 `tools/sdk/bin`。
-4. **执行策略**：脚本用 `powershell -ExecutionPolicy Bypass -File`（或 `scripts\build.cmd`）运行。
-5. **运行时依赖**：可执行文件静态链接 CRT，仅需 `libcrypto-3-x64.dll`（构建后自动复制到输出目录）。
-
-## 6. 已知限制
+## 5. 已知限制
 
 - 无密码仓库使用内置固定密钥，**只混淆不保密**
 - 索引整体在内存中，文件数量极大时 `save_index` 会变慢
@@ -148,16 +146,14 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 
 ## 7. 测试
 
-`tests/test.ps1` 覆盖 **67 项断言**：初始化、8 种尺寸的存取往返（0/1/511/512/513/4096/4097/1 MiB）、
-重复添加、缺失文件、删除、锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库，
-**内部路径与目录树**（整目录导入、显式路径、尾斜杠入目录、目录导出、默认导出根、`out` 配置、
-`rm` 目录需 `-r`、路径穿越拒绝），以及 **v1.0.0 新增**：`import` 完整镜像（含空目录）、
-目录条目 `ls`、空目录还原、精确目录导出、**中文路径导入/导出往返**、版本号横幅。
+`tests/test.ps1` 覆盖 **74 项断言**：初始化、8 种尺寸的存取往返、重复添加、缺失文件、删除、
+锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库；内部路径与目录树（整目录导入、显式路径、
+尾斜杠入目录、目录导出、默认导出根、`out` 配置、`rm -r`、路径穿越拒绝）；`import` 含空目录镜像、
+目录条目、空目录还原、精确目录导出、中文路径往返、版本横幅；以及**三档存储边界**
+（1 KiB inline / 1025 B 4 KiB 块 / 256 KiB / 256 KiB+1 大块）。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep
 ```
 
-> 注意 1：所有 `.ps1` 文件需保存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会按 GBK 解析中文。
-> 注意 2：测试通过管道喂命令，脚本内已设 `$OutputEncoding = UTF8`；手工写批处理时 cmd 需 `chcp 65001`。
+> 注意：测试通过管道喂命令，脚本内已设 `$OutputEncoding = UTF8`；手工写批处理时 cmd 需 `chcp 65001`。

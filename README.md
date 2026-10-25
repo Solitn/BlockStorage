@@ -29,54 +29,17 @@ Extracted report.pdf -> D:\out\report.pdf (245760 bytes)
 - **子密钥隔离**：每个块用 `SHA256(master ‖ domain ‖ block_id)` 派生的独立子密钥
 - **密码派生**：PBKDF2-HMAC-SHA256，60 万次迭代，随机盐随 `.block/key` 保存
 
-## 构建
+## 运行
 
-依赖：CMake ≥ 3.16、C++17 编译器（MSVC 或 GCC）、OpenSSL 3.x。
+直接用已编译好的 `build\BlockStorage.exe`（同目录已带 `libcrypto-3-x64.dll`），
+在**目标目录**启动即可，仓库会建在当前目录的 `.block/`：
 
-### Windows（本机已配好的便携工具链）
-
-```powershell
-# 一键构建（内部自动 dot-source env.ps1、生成缺失的 oldnames.lib）
-scripts\build.cmd            # 或： scripts\build.cmd -Clean
+```bat
+cd /d D:\vault
+C:\path\to\blockstorage\build\BlockStorage.exe
 ```
 
-### 从零准备工具链（无需管理员、不污染系统）
-
-```powershell
-# 1) OpenSSL + CMake
-python scripts\setup_tools.py openssl cmake
-
-# 2) 便携 MSVC（从 VS 2022 通道解包）+ /MT 所需的 CRT 资源
-python scripts\fetch_msvc.py msvc
-
-# 3) Windows SDK 头文件与库（NuGet 包，约 210 MB，慢网可反复续传）
-python scripts\fetch_url.py https://globalcdn.nuget.org/packages/microsoft.windows.sdk.cpp.10.0.28000.2705.nupkg        tools\downloads\microsoft.windows.sdk.cpp.10.0.28000.2705.nupkg 150000000
-python scripts\fetch_url.py https://globalcdn.nuget.org/packages/microsoft.windows.sdk.cpp.x64.10.0.28000.2705.nupkg    tools\downloads\microsoft.windows.sdk.cpp.x64.10.0.28000.2705.nupkg 50000000
-python scripts\fetch_url.py https://globalcdn.nuget.org/packages/microsoft.windows.sdk.buildtools.10.0.26100.1742.nupkg tools\downloads\sdktools.nupkg 20000000
-
-# 4) 解包 SDK（含 rc.exe / mt.exe）
-python scripts\unpack_sdk.py
-
-# 5) 构建
-scripts\build.cmd
-```
-
-> 说明：便携 MSVC 包缺少 `msvcprt.lib` 等导入库，因此构建使用**静态 CRT（/MT）**；
-> 可执行文件只依赖 `libcrypto-3-x64.dll`（构建后自动复制到输出目录）。
-
-### 已有系统工具链
-
-```bash
-export OPENSSL_ROOT_DIR=/path/to/openssl
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
-
-### 测试
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保留测试目录
-```
+需要重新编译时执行 `scripts\build.cmd`；测试执行 `powershell -ExecutionPolicy Bypass -File .\tests\test.ps1`。
 
 ## 命令
 
@@ -133,28 +96,37 @@ get /backup/photos D:\restore    -> D:\restore\...
 ```
 .block/
 ├── key           salt(32) ‖ SHA256(派生密钥)(32)   ← 明文，用于校验密码
-├── idx           AES-256-GCM 加密的 JSON 索引
-├── data.blk      大块区：每块 nonce(12) ‖ ct(4096) ‖ tag(16) = 4124 B
+├── idx           AES-256-GCM 加密的 JSON 索引（含内联小文件）
+├── data.blk      大块区：nonce(12) ‖ ct(256 KiB) ‖ tag(16) = 262172 B/块
 ├── bitmap        大块分配位图（1 bit/块）
-├── data.small    小文件区：每槽 nonce(12) ‖ ct(512) ‖ tag(16) = 540 B
-└── bitmap.small  小槽分配位图
+├── data.small    小块区：nonce(12) ‖ ct(4 KiB) ‖ tag(16) = 4124 B/块
+└── bitmap.small  小块分配位图
 ```
 
-索引 JSON（解密后，v3 起含目录条目）：
+**三档存储**（按文件大小自动选择）：
+
+| 文件大小 | 存法 |
+|---|---|
+| ≤ 1 KiB | **内联**：内容 base64 直接写进加密索引，不占数据区 |
+| 1 KiB ~ 256 KiB | **小块**：按 4 KiB 分块写入 `data.small` |
+| > 256 KiB | **大块**：按 256 KiB 分块写入 `data.blk` |
+
+索引 JSON（解密后）：
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "files": {
     "/docs":            {"kind": "dir"},
     "/docs/empty":      {"kind": "dir"},
-    "/docs/report.pdf": {"kind": "blk",   "size": 245760, "sha256": "…", "blocks": [0, 1, 2]},
-    "/docs/note.txt":   {"kind": "small", "size": 42,     "sha256": "…", "slot": 7}
+    "/docs/note.txt":   {"kind": "inline", "size": 42,      "sha256": "…", "data": "5Lit5paH"},
+    "/docs/small.bin":  {"kind": "small",  "size": 100000,  "sha256": "…", "blocks": [0,1,2]},
+    "/docs/report.pdf": {"kind": "blk",    "size": 1048576, "sha256": "…", "blocks": [0,1,2,3]}
   }
 }
 ```
 
-旧索引会自动迁移：v1 的扁平键 `a.txt` → `/a.txt`；v2 无目录条目，读取时按路径推断。
+旧仓库（索引版本 ≤3）仍可读写：记录尺寸按索引版本自动切换。
 
 ## 安全说明
 

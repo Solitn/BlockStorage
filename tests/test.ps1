@@ -122,12 +122,12 @@ Check 'correct password unlocks' ($out -match 'Loaded repository')
 Check 'ls works after unlock' ($out -match 'one\.bin')
 
 Write-Host "== tamper detection ==" -ForegroundColor Cyan
-$data = Join-Path $Work '.block\data.blk'
+$data = Join-Path $Work '.block\data.small'
 $bytes = [IO.File]::ReadAllBytes($data)
-Check 'data.blk has content' ($bytes.Length -gt 4200)
+Check 'data.small has content' ($bytes.Length -gt 4200)
 if ($bytes.Length -gt 4200) {
-    # 块 1（偏移 4124 起）属于 s4096.bin
-    $off = 4124 + 100
+    # 4 KiB 小块区：第 2 块（偏移 4124）属于 s4096.bin
+    $off = 100   # 第 1 个 4 KiB 块属于 s4096.bin
     $bytes[$off] = $bytes[$off] -bxor 0xFF
     [IO.File]::WriteAllBytes($data, $bytes)
     $out = Run-Repo @('get s4096.bin out\tampered.bin', 'exit')
@@ -137,6 +137,29 @@ if ($bytes.Length -gt 4200) {
     $out = Run-Repo @('get one.bin out\one2.bin', 'exit')
     Check 'restored data readable' ((Test-Path (Join-Path $Work 'out\one2.bin')))
 }
+
+Write-Host "== 存储分层（inline / 4 KiB / 256 KiB）==" -ForegroundColor Cyan
+$tier = Join-Path $Work 'tier'
+New-Item -ItemType Directory -Path $tier -Force | Out-Null
+foreach ($n in 1024, 1025, 262144, 262145) {
+    New-Sample (Join-Path $tier "t$n.bin") $n
+}
+$out = Run-Repo @("add $tier\t1024.bin /t1024", "add $tier\t1025.bin /t1025",
+                  "add $tier\t262144.bin /t262144", "add $tier\t262145.bin /t262145", 'exit')
+Check '1 KiB inline' ($out -match 'Added /t1024 \(1024 bytes, inline\)')
+Check '1025 B -> 4k' ($out -match 'Added /t1025 \(1025 bytes, 1 x4k\)')
+Check '256 KiB -> 64 x4k' ($out -match 'Added /t262144 \(262144 bytes, 64 x4k\)')
+Check '256 KiB + 1 -> 256k' ($out -match 'Added /t262145 \(262145 bytes, 2 x256k\)')
+
+$out = Run-Repo @('statu', 'exit')
+Check 'statu shows inline count' ($out -match 'inline\s+:\s+\d+ file')
+Check 'statu shows 256 KiB blocks' ($out -match 'big blocks\s*:\s*\d+ / \d+ used \(256 KiB each\)')
+
+$tierOut = Join-Path $Work 'tier-out'
+$out = Run-Repo @("get /t262145 $tierOut\t262145.bin", 'exit')
+Check 'big-block round-trip' ((Test-Path (Join-Path $tierOut 't262145.bin')) -and
+                              ((Get-FileHash (Join-Path $tier 't262145.bin')).Hash -eq
+                               (Get-FileHash (Join-Path $tierOut 't262145.bin')).Hash))
 
 Write-Host "== directory tree (内部路径) ==" -ForegroundColor Cyan
 $tree = Join-Path $Work 'tree'

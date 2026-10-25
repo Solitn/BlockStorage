@@ -123,7 +123,8 @@ const std::map<std::string, std::string> HELP_DETAILS = {
      "  例：out D:\\restore       out"},
     {"statu",
      "statu\n"
-     "  显示仓库标志（isfind/iscomplete/haskey/hasload）、块与槽使用率、文件数、导出根目录。"},
+     "  显示仓库标志（isfind/iscomplete/haskey/hasload）、256 KiB 大块与 4 KiB 小块使用率、\n"
+     "  内联文件数、文件/目录数、默认导出根目录。"},
     {"delete",
      "delete\n"
      "  删除当前目录下的整个 .block/ 仓库（不可恢复）。"},
@@ -216,10 +217,9 @@ Result cmd_statu(const Args& args) {
     }
     if (res_statu.isfind && res_statu.iscomplete) {
         StoreStats s = stats();
-        std::cout << "blocks     : " << s.blocks_used << " / " << s.blocks
-                  << " used (" << store::kBlockRec << " B each)\n";
-        std::cout << "small slots: " << s.slots_used << " / " << s.slots
-                  << " used (" << store::kSmallRec << " B each)\n";
+        std::cout << "big blocks : " << s.blocks_used << " / " << s.blocks << " used (256 KiB each)\n";
+        std::cout << "small blocks: " << s.slots_used << " / " << s.slots << " used (4 KiB each)\n";
+        std::cout << "inline     : " << s.inline_files << " file(s)\n";
         if (res_statu.hasload) {
             if (!g_index_loaded) g_index_loaded = load_index(res_statu.key);
             if (g_index_loaded) {
@@ -376,7 +376,7 @@ Result cmd_init(const Args& args) {
     res_statu.key_sha256 = digest;
     g_index_loaded = true;
     files = json::object();
-    files["version"] = 2;
+    files["version"] = 4;
     files["files"] = json::object();
 
     std::cout << "salt (Base64): " << Base64Encode(salt_bytes) << std::endl;

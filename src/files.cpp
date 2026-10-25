@@ -18,10 +18,6 @@
 #include "utf8.h"
 
 namespace fs = std::filesystem;
-using store::kBlockRec;
-using store::kBlockSize;
-using store::kSmallRec;
-using store::kSmallSize;
 
 namespace {
 
@@ -35,9 +31,31 @@ const U8list kDefaultKey = {
 
 json empty_index() {
     json j;
-    j["version"] = 3;
+    j["version"] = 4;
     j["files"] = json::object();
     return j;
+}
+
+// 存储格式：随索引版本切换（v4：256 KiB 大块 / 4 KiB 小块 / 极小文件内联）
+struct Format {
+    std::size_t tiny = store::kTinySize;
+    std::size_t blk_payload = store::kLargeBlock;
+    std::size_t blk_rec = store::kLargeRec;
+    std::size_t small_payload = store::kSmallBlock;
+    std::size_t small_rec = store::kSmallRec;
+};
+
+Format g_format{};
+
+const Format& NewFormat() {
+    static const Format f;
+    return f;
+}
+
+const Format& LegacyFormat() {
+    static const Format f{0, store::kLegacyBlockSize, store::kLegacyBlockRec,
+                          store::kLegacySmallSize, store::kLegacySmallRec};
+    return f;
 }
 
 json& index_root() {
@@ -174,6 +192,7 @@ bool load_index(const U8list& key) {
     U8list raw = read_file(store::layout().index);
     if (raw.empty()) {
         files = empty_index();
+        g_format = NewFormat();
         return true;
     }
     json j = decrypt_json(raw, RepoKey(key));
@@ -181,7 +200,7 @@ bool load_index(const U8list& key) {
         return false;
     }
 
-    // v1（扁平名字）-> v2（内部路径）
+    // v1（扁平名字）-> v2+（内部路径）
     json migrated = json::object();
     for (auto it = j["files"].begin(); it != j["files"].end(); ++it) {
         std::string name = it.key();
@@ -189,7 +208,11 @@ bool load_index(const U8list& key) {
         migrated[name] = it.value();
     }
     j["files"] = migrated;
-    j["version"] = 2;
+
+    const int version = j.value("version", 1);
+    // v4 起：256 KiB 大块 / 4 KiB 小块 / 极小内联；更早的仓库沿用旧记录尺寸
+    g_format = (version >= 4) ? NewFormat() : LegacyFormat();
+    j["version"] = (version >= 4) ? 4 : version;
     files = j;
     return true;
 }
@@ -257,66 +280,65 @@ Result add_file(const std::string& src, const std::string& internal_in, const U8
     const store::Layout& L = store::layout();
     const U8list master = RepoKey(key);
     const std::string digest = Base64Encode(Sha256(plain));
+    const Format& F = g_format;
 
-    if (plain.size() <= kSmallSize) {
-        std::vector<std::uint8_t> bits;
-        if (!store::bitmap_load(L.small_bitmap, bits)) return {false, "Cannot read small bitmap"};
-        std::uint64_t slot = next_id(L.small_data, kSmallRec, bits, 0);
-
-        U8list payload(kSmallSize, 0);
-        std::copy(plain.begin(), plain.end(), payload.begin());
-        U8list rec = GcmSeal(payload, SubKey(master, 2, slot));
-        if (rec.empty()) return {false, "Encryption failed"};
-        if (!store::record_write(L.small_data, kSmallRec, slot, rec)) {
-            return {false, "Cannot write small slot"};
-        }
-        store::bitmap_set(bits, slot, true);
-        if (!store::bitmap_save(L.small_bitmap, bits)) return {false, "Cannot update small bitmap"};
-
+    // 1) 极小文件：内容直接 base64 写进索引（索引本身是 AES-GCM 加密的）
+    if (F.tiny > 0 && plain.size() <= F.tiny) {
         json entry;
-        entry["kind"] = "small";
-        entry["slot"] = slot;
+        entry["kind"] = "inline";
         entry["size"] = plain.size();
         entry["sha256"] = digest;
+        entry["data"] = Base64Encode(plain);
         idx[name] = entry;
         if (!save_index(master)) {
-            store::bitmap_set(bits, slot, false);
-            store::bitmap_save(L.small_bitmap, bits);
+            idx.erase(name);
             return {false, "Cannot write index"};
         }
-        return {true, "Added " + name + " (" + std::to_string(plain.size()) + " bytes, 1 slot)"};
+        return {true, "Added " + name + " (" + std::to_string(plain.size()) + " bytes, inline)"};
     }
 
-    std::vector<std::uint8_t> bits;
-    if (!store::bitmap_load(L.bitmap, bits)) return {false, "Cannot read bitmap"};
+    // 2) ≤256 KiB 走 4 KiB 小块区，更大走 256 KiB 大块区（旧仓库按旧尺寸）
+    const bool use_small = plain.size() <= F.blk_payload;
+    const std::string& data_path = use_small ? L.small_data : L.data;
+    const std::string& bm_path = use_small ? L.small_bitmap : L.bitmap;
+    const std::size_t payload_size = use_small ? F.small_payload : F.blk_payload;
+    const std::size_t rec_size = use_small ? F.small_rec : F.blk_rec;
+    const std::uint8_t domain = use_small ? 2 : 1;
+    const char* kind = use_small ? "small" : "blk";
 
-    const std::uint64_t nblocks = (plain.size() + kBlockSize - 1) / kBlockSize;
+    std::vector<std::uint8_t> bits;
+    if (!store::bitmap_load(bm_path, bits)) return {false, "Cannot read bitmap"};
+
+    const std::uint64_t nblocks = (plain.size() + payload_size - 1) / payload_size;
     std::vector<std::uint64_t> allocated;
     allocated.reserve(static_cast<std::size_t>(nblocks));
     json blocks = json::array();
     std::uint64_t hint = 0;
 
+    auto rollback = [&]() {
+        for (std::uint64_t done : allocated) store::bitmap_set(bits, done, false);
+        store::bitmap_save(bm_path, bits);
+    };
+
     for (std::uint64_t i = 0; i < nblocks; ++i) {
-        const std::uint64_t id = next_id(L.data, kBlockRec, bits, hint);
+        const std::uint64_t id = next_id(data_path, rec_size, bits, hint);
         hint = id + 1;
 
-        U8list payload(kBlockSize, 0);
-        const std::uint64_t offset = i * kBlockSize;
+        U8list payload(payload_size, 0);
+        const std::uint64_t offset = i * payload_size;
         const std::size_t take = static_cast<std::size_t>(
-            std::min<std::uint64_t>(kBlockSize, plain.size() - offset));
+            std::min<std::uint64_t>(payload_size, plain.size() - offset));
         std::copy(plain.begin() + static_cast<std::ptrdiff_t>(offset),
                   plain.begin() + static_cast<std::ptrdiff_t>(offset + take),
                   payload.begin());
 
-        U8list rec = GcmSeal(payload, SubKey(master, 1, id));
+        U8list rec = GcmSeal(payload, SubKey(master, domain, id));
         if (rec.empty()) {
-            for (std::uint64_t done : allocated) store::bitmap_set(bits, done, false);
-            store::bitmap_save(L.bitmap, bits);
+            rollback();
             return {false, "Encryption failed"};
         }
-        if (!store::record_write(L.data, kBlockRec, id, rec)) {
-            for (std::uint64_t done : allocated) store::bitmap_set(bits, done, false);
-            store::bitmap_save(L.bitmap, bits);
+        if (!store::record_write(data_path, rec_size, id, rec)) {
+            rollback();
             return {false, "Cannot write data block"};
         }
         store::bitmap_set(bits, id, true);
@@ -324,27 +346,25 @@ Result add_file(const std::string& src, const std::string& internal_in, const U8
         blocks.push_back(id);
     }
 
-    if (!store::bitmap_save(L.bitmap, bits)) {
-        for (std::uint64_t done : allocated) store::bitmap_set(bits, done, false);
-        store::bitmap_save(L.bitmap, bits);
+    if (!store::bitmap_save(bm_path, bits)) {
+        rollback();
         return {false, "Cannot update bitmap"};
     }
 
     json entry;
-    entry["kind"] = "blk";
+    entry["kind"] = kind;
     entry["size"] = plain.size();
     entry["sha256"] = digest;
     entry["blocks"] = blocks;
     idx[name] = entry;
 
     if (!save_index(master)) {
-        for (std::uint64_t done : allocated) store::bitmap_set(bits, done, false);
-        store::bitmap_save(L.bitmap, bits);
+        rollback();
         return {false, "Cannot write index"};
     }
 
     return {true, "Added " + name + " (" + std::to_string(plain.size()) + " bytes, " +
-                      std::to_string(nblocks) + " blocks)"};
+                      std::to_string(nblocks) + (use_small ? " x4k)" : " x256k)")};
 }
 
 Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
@@ -463,29 +483,34 @@ static Result export_one(const std::string& internal, const fs::path& out_path,
         return {false, "Corrupted index entry: " + internal};
     }
 
-    if (entry["kind"] == "small") {
-        const std::uint64_t slot = entry["slot"].get<std::uint64_t>();
-        U8list rec;
-        if (!store::record_read(L.small_data, kSmallRec, slot, rec)) {
-            return {false, "Cannot read small slot " + std::to_string(slot)};
+    const std::string kind = entry.value("kind", "");
+    const Format& F = g_format;
+
+    if (kind == "inline") {
+        if (!entry.contains("data") || !Base64Decode(entry["data"].get<std::string>(), plain)) {
+            return {false, "Corrupted inline data for " + internal};
         }
-        U8list payload;
-        if (!GcmOpen(rec, SubKey(master, 2, slot), payload)) {
-            return {false, "Data authentication failed (wrong key or corrupted slot)"};
-        }
-        plain = payload;
-    } else if (entry["kind"] == "blk") {
+    } else if (kind == "small" || kind == "blk") {
+        const bool use_small = (kind == "small");
+        const std::string& data_path = use_small ? L.small_data : L.data;
+        const std::size_t rec_size = use_small ? F.small_rec : F.blk_rec;
+        const std::uint8_t domain = use_small ? 2 : 1;
+
+        if (!entry.contains("blocks")) return {false, "Corrupted index entry: " + internal};
         for (const auto& b : entry["blocks"]) {
             const std::uint64_t id = b.get<std::uint64_t>();
             U8list rec;
-            if (!store::record_read(L.data, kBlockRec, id, rec)) {
+            if (!store::record_read(data_path, rec_size, id, rec)) {
                 return {false, "Cannot read block " + std::to_string(id)};
             }
             U8list payload;
-            if (!GcmOpen(rec, SubKey(master, 1, id), payload)) {
+            if (!GcmOpen(rec, SubKey(master, domain, id), payload)) {
                 return {false, "Data authentication failed (wrong key or corrupted block)"};
             }
             plain.insert(plain.end(), payload.begin(), payload.end());
+        }
+        if (!use_small && plain.size() < entry.value("size", std::uint64_t{0})) {
+            return {false, "Truncated data for " + internal};
         }
     } else {
         return {false, "Unknown entry kind for " + internal};
@@ -634,16 +659,29 @@ Result remove_file(const std::string& internal_in, const U8list& key, bool recur
     for (const std::string& t : targets) {
         const json& entry = idx[t];
         const std::string kind = entry.value("kind", "");
-        if (kind == "small") {
-            if (small_bits.empty()) store::bitmap_load(L.small_bitmap, small_bits);
-            store::bitmap_set(small_bits, entry["slot"].get<std::uint64_t>(), false);
-            small_dirty = true;
-        } else if (kind == "blk") {
-            if (bits.empty()) store::bitmap_load(L.bitmap, bits);
-            for (const auto& b : entry["blocks"]) {
-                store::bitmap_set(bits, b.get<std::uint64_t>(), false);
+        if (kind == "small" || kind == "blk") {
+            const bool use_small = (kind == "small");
+            // 旧格式（index ≤ v3）用 slot 单槽记录
+            if (entry.contains("slot")) {
+                if (small_bits.empty()) store::bitmap_load(L.small_bitmap, small_bits);
+                store::bitmap_set(small_bits, entry["slot"].get<std::uint64_t>(), false);
+                small_dirty = true;
+                continue;
             }
-            blocks_dirty = true;
+            if (!entry.contains("blocks")) continue;
+            if (use_small) {
+                if (small_bits.empty()) store::bitmap_load(L.small_bitmap, small_bits);
+                for (const auto& b : entry["blocks"]) {
+                    store::bitmap_set(small_bits, b.get<std::uint64_t>(), false);
+                }
+                small_dirty = true;
+            } else {
+                if (bits.empty()) store::bitmap_load(L.bitmap, bits);
+                for (const auto& b : entry["blocks"]) {
+                    store::bitmap_set(bits, b.get<std::uint64_t>(), false);
+                }
+                blocks_dirty = true;
+            }
         }
     }
 
@@ -733,11 +771,20 @@ StoreStats stats() {
 
     store::bitmap_load(L.bitmap, bits);
     s.blocks_used = store::bitmap_used(bits);
-    s.blocks = std::max<std::uint64_t>(s.blocks_used, store::record_count(L.data, kBlockRec));
+    s.blocks = std::max<std::uint64_t>(s.blocks_used, store::record_count(L.data, g_format.blk_rec));
 
     bits.clear();
     store::bitmap_load(L.small_bitmap, bits);
     s.slots_used = store::bitmap_used(bits);
-    s.slots = std::max<std::uint64_t>(s.slots_used, store::record_count(L.small_data, kSmallRec));
+    s.slots = std::max<std::uint64_t>(s.slots_used, store::record_count(L.small_data, g_format.small_rec));
+
+    // 内联在索引里的小文件
+    std::uint64_t inline_files = 0;
+    if (files.is_object() && files.contains("files") && files["files"].is_object()) {
+        for (auto it = files["files"].begin(); it != files["files"].end(); ++it) {
+            if (it.value().value("kind", "") == "inline") ++inline_files;
+        }
+    }
+    s.inline_files = inline_files;
     return s;
 }

@@ -32,8 +32,33 @@ std::string Base64Encode(const std::vector<uint8_t>& data) {
     return out;
 }
 
-U8list Sha256(const U8list& data) {
-    U8list out(32);
+bool Base64Decode(const std::string& text, U8list& out) {
+    out.clear();
+    std::string clean;
+    clean.reserve(text.size());
+    for (char c : text) {
+        if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+        clean.push_back(c);
+    }
+    if (clean.empty()) return true;
+    if (clean.size() % 4 != 0) return false;
+
+    out.resize(clean.size() / 4 * 3);
+    const int n = EVP_DecodeBlock(out.data(),
+                                  reinterpret_cast<const unsigned char*>(clean.data()),
+                                  static_cast<int>(clean.size()));
+    if (n < 0) {
+        out.clear();
+        return false;
+    }
+    std::size_t pad = 0;
+    if (clean.size() >= 1 && clean[clean.size() - 1] == '=') ++pad;
+    if (clean.size() >= 2 && clean[clean.size() - 2] == '=') ++pad;
+    out.resize(static_cast<std::size_t>(n) - pad);
+    return true;
+}
+
+U8list Sha256(const U8list& data) {    U8list out(32);
     unsigned int len = 0;
     EVP_Digest(data.data(), data.size(), out.data(), &len, EVP_sha256(), nullptr);
     return out;

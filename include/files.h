@@ -31,9 +31,10 @@ struct ListRow {
 bool list_files(const std::string& prefix, bool recursive, std::vector<ListRow>& out);
 
 struct StoreStats {
-    std::uint64_t blocks = 0;
+    std::uint64_t blocks = 0;        // 256 KiB 大块总数
     std::uint64_t blocks_used = 0;
-    std::uint64_t slots = 0;
+    std::uint64_t slots = 0;         // 4 KiB 小块总数
     std::uint64_t slots_used = 0;
+    std::uint64_t inline_files = 0;  // 直接存索引的内联文件数
 };
 StoreStats stats();

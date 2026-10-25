@@ -1,6 +1,6 @@
 # BlockStorage 操作指南
 
-面向使用者的完整操作手册。设计/实现细节见 [ARCHITECTURE.md](ARCHITECTURE.md)，构建细节见 [README.md](README.md)。
+面向使用者的完整操作手册。设计/实现细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
@@ -37,10 +37,18 @@ BlockStorage> exit
 | 文件 | 作用 |
 |---|---|
 | `key` | 盐 + 密码校验摘要（明文，不含密码本身） |
-| `idx` | 加密的文件索引（哪些文件、多大、在哪几块） |
-| `data.blk` / `bitmap` | 大块数据区与分配位图 |
-| `data.small` / `bitmap.small` | 小文件（≤512 B）内联区与位图 |
+| `idx` | 加密的文件索引（哪些文件、多大、在哪几块；≤1 KiB 的文件内容也在这里） |
+| `data.blk` / `bitmap` | 256 KiB 大块数据区与分配位图 |
+| `data.small` / `bitmap.small` | 4 KiB 小块数据区与分配位图 |
 | `config.json` | 可选，记录默认导出根目录 |
+
+文件按大小自动选择存储方式：
+
+| 大小 | 存法 |
+|---|---|
+| ≤ 1 KiB | 内联：base64 直接放进加密索引 |
+| 1 KiB ~ 256 KiB | 4 KiB 小块（`data.small`） |
+| > 256 KiB | 256 KiB 大块（`data.blk`） |
 
 ### 2.2 内部路径
 
@@ -112,7 +120,7 @@ add <源路径> [内部路径] [-r]
 - 文件夹会**递归**导入其下所有文件与子目录，**空目录也会保留**（v1.0.0 起）
 - 同名内部路径已存在时整体拒绝：`Error: Path already exists in repository: /x/y`
 - 文件夹导入会输出 `Imported N file(s), M dir(s) into <路径>`，失败项计入 `skipped`
-- 单文件 ≤512 B 走小槽（省空间），更大文件按 4 KiB 分块
+- 单文件 ≤1 KiB 直接内联进索引；1 KiB~256 KiB 按 4 KiB 分块；更大按 256 KiB 分块
 
 ### 3.4 `import` — 完整镜像一个目录
 
