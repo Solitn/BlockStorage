@@ -17,8 +17,9 @@ std::string NormalizeInternalPath(const std::string& raw);
 
 // 文件操作（internal 为仓库内部路径）
 Result add_file(const std::string& src, const std::string& internal, const U8list& key);
+// 递归导入目录：文件与子目录（含空目录）都会建立索引条目
 Result add_tree(const std::string& src_dir, const std::string& internal_prefix,
-                const U8list& key, int& added, int& failed);
+                const U8list& key, int& files_added, int& dirs_added, int& failed);
 Result get_file(const std::string& internal, const std::string& dst, const U8list& key);
 Result remove_file(const std::string& internal, const U8list& key, bool recursive);
 

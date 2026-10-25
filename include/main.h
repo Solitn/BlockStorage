@@ -1,6 +1,7 @@
 #pragma once
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -10,13 +11,17 @@
 
 using json = nlohmann::json;
 
-// 读取整个文件；失败返回空
-inline std::vector<uint8_t> read_file(const std::string& path) {
+// 读取整个文件；失败返回空。接受 fs::path 以便正确处理非 ASCII 文件名
+inline std::vector<uint8_t> read_file(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
                               std::istreambuf_iterator<char>());
     return data;
+}
+
+inline std::vector<uint8_t> read_file(const std::string& path) {
+    return read_file(std::filesystem::path(path));
 }
 
 extern Status res_statu;

@@ -12,6 +12,7 @@ Result cmd_load(const Args& args);
 Result cmd_delete(const Args& args);
 Result cmd_help(const Args& args);
 Result cmd_add(const Args& args);
+Result cmd_import(const Args& args);
 Result cmd_get(const Args& args);
 Result cmd_ls(const Args& args);
 Result cmd_rm(const Args& args);

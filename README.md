@@ -1,10 +1,12 @@
 # BlockStorage
 
+> 当前版本 **1.0.0**
+
 一个用 C++17 写的**命令行加密块存储仓库**：把文件切块写入本地仓库目录 `.block/`，
 索引与数据块都以 AES-256-GCM 加密，用密码派生密钥解锁。
 
 ```
-BlockStorage v0.1
+BlockStorage v1.0.0
 BlockStorage, made by @solitn
 Github: https://github.com/solitn/blockstorage
 Repository not found
@@ -85,8 +87,9 @@ powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保�
 | `init [-p<pwd>] [-s<salt>]` | 初始化仓库；带 `-p` 用密码加密，`-s` 指定盐（默认随机） |
 | `load -p<pwd>` | 解锁仓库（每个进程启动后都要解锁） |
 | `add <源> [内路径] [-r]` | 加入文件或整个文件夹（保留子目录结构） |
-| `get <内路径> [目标]` | 取出文件或整个目录树；省略目标则用默认导出根 |
-| `ls [内路径] [-r]` | 列出条目（`-r` 递归） |
+| `import <目录> [内路径]` | 完整镜像目录：所有文件 + 所有子目录（**含空目录**） |
+| `get <内路径> [目标]` | 取出文件或整个目录树（含空目录）；省略目标则用默认导出根 |
+| `ls [内路径] [-r]` | 列出条目（`-r` 递归，目录带 `/` 后缀） |
 | `rm <内路径> [-r]` | 删除文件；目录需 `-r` |
 | `out [路径]` | 查看/设置默认导出根目录 |
 | `statu` | 仓库状态、块与槽使用率、文件/目录数、导出根 |
@@ -96,14 +99,17 @@ powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep     # -Keep 保�
 
 ### 内部路径
 
-仓库内统一用 `/` 寻址，例如 `/docs/report.pdf`。目录由文件路径隐式形成：
+仓库内统一用 `/` 寻址，例如 `/docs/report.pdf`。目录既可由文件路径隐式形成，
+也可由 `import` 显式建条目（因此空目录也能保存/还原）：
 
 ```text
-add D:\photos                 -> /photos/2024/a.jpg
-add D:\photos /backup/photos  -> /backup/photos/2024/a.jpg
-add D:\a.txt /docs/           -> /docs/a.txt
-get /backup/photos D:\restore -> D:\restore\2024\a.jpg
+import D:\photos /backup/photos  -> /backup/photos/...（含空目录）
+add D:\photos                    -> /photos/...
+add D:\a.txt /docs/              -> /docs/a.txt
+get /backup/photos D:\restore    -> D:\restore\...
 ```
+
+路径支持中文（内部统一 UTF-8）。
 
 ### 默认导出根目录
 
@@ -114,6 +120,13 @@ get /backup/photos D:\restore -> D:\restore\2024\a.jpg
 3. 内置默认 `C:\BlockStorage\extract`
 
 `scripts/env.ps1` 会把 `BLOCKSTORAGE_OUT` 指向仓库内 `out\extract`，方便开发测试。
+
+### 编码说明
+
+- 程序入口是 `wmain`，命令行参数按 UTF-16 接收后转 UTF-8，中文路径/文件名可直接使用
+- 控制台输出统一 UTF-8；交互输入会自动识别 UTF-8 或 GBK
+- **管道/批处理**：cmd 里请先 `chcp 65001`；PowerShell 里设 `$OutputEncoding = [Text.Encoding]::UTF8`
+  （Windows PowerShell 5.1 默认 ASCII，中文会变成 `?`）
 
 ## 仓库格式
 
@@ -127,19 +140,21 @@ get /backup/photos D:\restore -> D:\restore\2024\a.jpg
 └── bitmap.small  小槽分配位图
 ```
 
-索引 JSON（解密后，v2 起使用内部路径）：
+索引 JSON（解密后，v3 起含目录条目）：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "files": {
+    "/docs":            {"kind": "dir"},
+    "/docs/empty":      {"kind": "dir"},
     "/docs/report.pdf": {"kind": "blk",   "size": 245760, "sha256": "…", "blocks": [0, 1, 2]},
     "/docs/note.txt":   {"kind": "small", "size": 42,     "sha256": "…", "slot": 7}
   }
 }
 ```
 
-旧的扁平索引（v1，键为 `a.txt`）在 `load` 时会自动迁移为 `/a.txt`。
+旧索引会自动迁移：v1 的扁平键 `a.txt` → `/a.txt`；v2 无目录条目，读取时按路径推断。
 
 ## 安全说明
 
@@ -158,13 +173,14 @@ get /backup/photos D:\restore -> D:\restore\2024\a.jpg
 ├── ARCHITECTURE.md        设计说明与已知限制
 ├── include/               头文件（含 nlohmann/json 单头文件）
 ├── src/                   实现
-│   ├── main.cpp           REPL 入口
+│   ├── main.cpp           wmain 入口（UTF-16 → UTF-8）+ REPL
 │   ├── command.cpp        命令表与各命令实现
 │   ├── files.cpp          内部路径 / 索引 / 分块读写 / 目录导入导出
 │   ├── store.cpp          定长记录 / 位图 / 目录管理
 │   ├── config.cpp         导出根目录配置（env / config.json / 默认）
+│   ├── utf8.cpp           UTF-8 ↔ 宽字符、管道输入编码归一化
 │   └── encrypt.cpp        PBKDF2 / AES-GCM / SHA-256 / Base64
 ├── scripts/               便携工具链下载、环境、构建脚本
-├── tests/test.ps1         端到端测试（53 项断言）
+├── tests/test.ps1         端到端测试（67 项断言）
 └── tools/                 便携工具链（已忽略，不入库）
 ```

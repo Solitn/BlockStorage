@@ -8,14 +8,14 @@
 
 ```text
 D:\work> BlockStorage.exe
-BlockStorage v0.1
+BlockStorage v1.0.0
 Repository not found
 BlockStorage> init -pMyPass123
 ...
 BlockStorage> add D:\docs\report.pdf /docs/report.pdf
 Added /docs/report.pdf (245760 bytes, 60 blocks)
-BlockStorage> add D:\photos /backup/photos
-Imported 128 file(s) into /backup/photos
+BlockStorage> import D:\photos /backup/photos
+Imported 128 file(s), 12 dir(s) into /backup/photos
 BlockStorage> ls /
 dir   -             /backup/
 dir   -             /docs/
@@ -48,8 +48,9 @@ BlockStorage> exit
 
 - `/` 是仓库根
 - `/docs/report.pdf`、`/backup/photos/2024/a.jpg`
-- 目录不需要单独创建，写入文件时自动存在（`add D:\photos` 会保留子目录结构）
+- 目录由两层构成：文件路径的每一级父目录自动存在；`import` 还会为每个目录（**含空目录**）建立显式目录条目
 - 反斜杠会自动转换；`.`、`..`、盘符（`C:`）等非法段会被拒绝
+- 路径按 UTF-8 存储，中文目录名可直接使用
 
 ### 2.3 默认导出根目录（out）
 
@@ -108,12 +109,31 @@ add <源路径> [内部路径] [-r]
 
 要点：
 
-- 文件夹会**递归**导入其下所有文件；空目录不会保留（仓库只存文件）
+- 文件夹会**递归**导入其下所有文件与子目录，**空目录也会保留**（v1.0.0 起）
 - 同名内部路径已存在时整体拒绝：`Error: Path already exists in repository: /x/y`
-- 文件夹导入会输出 `Imported N file(s) into <路径>`，失败项计入 `skipped`
+- 文件夹导入会输出 `Imported N file(s), M dir(s) into <路径>`，失败项计入 `skipped`
 - 单文件 ≤512 B 走小槽（省空间），更大文件按 4 KiB 分块
 
-### 3.4 `get` — 取出（反向）
+### 3.4 `import` — 完整镜像一个目录
+
+```text
+import <本地目录> [内部路径]
+```
+
+把一个本地目录**完整**写进仓库：其下所有文件 + 所有子目录（含空目录）都会建立条目。
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| 镜像目录，用目录名 | `import D:\proj` | `/proj/...`（含空目录） |
+| 镜像到指定内部路径 | `import D:\proj /backup/proj-1.0` | `/backup/proj-1.0/...` |
+| 只导入空目录 | `import D:\templates /tpl` | `/tpl`（0 文件，目录条目保留） |
+
+- 与 `add <目录>` 行为一致；区别只在语义：`import` 明确要求参数是目录，单文件请用 `add`
+- 输出形如 `Imported 128 file(s), 20 dir(s) into /backup/proj`
+- 已存在的路径会被跳过（计入 `skipped`），不会覆盖
+- 反向导出用 `get`，空目录会一并还原
+
+### 3.5 `get` — 取出（反向）
 
 ```text
 get <内部路径> [目标]
@@ -128,16 +148,17 @@ get <内部路径> [目标]
 | 取整个目录用默认根 | `get /docs` | `<out 根>\docs\...` |
 | 取整个仓库 | `get /` | `<out 根>\...` |
 
-- 目录导出会保留完整目录结构，自动创建所需文件夹
+- 目录导出会保留完整目录结构（含空目录），自动创建所需文件夹
+- 输出形如 `Extracted 128 file(s), 20 dir(s) from /docs -> D:\restore`
 - 每个文件取回时都会校验 SHA-256，不匹配会报 `Checksum mismatch`
 - 数据块被篡改时 `GCM` tag 校验失败：`Data authentication failed`
 
-### 3.5 `ls` — 查看
+### 3.6 `ls` — 查看
 
 ```text
 ls                  # 根目录直接子项（目录带 / 后缀）
 ls /docs            # 指定目录的直接子项
-ls /docs -r         # 递归列出所有文件
+ls /docs -r         # 递归列出所有条目（含目录）
 ```
 
 输出示例：
@@ -145,35 +166,43 @@ ls /docs -r         # 递归列出所有文件
 ```text
 TYPE  SIZE          PATH
 dir   -             /docs/
+dir   -             /docs/empty/
 file  245760        /docs/report.pdf
 ```
 
-### 3.6 `rm` — 删除
+### 3.7 `rm` — 删除
 
 ```text
 rm /docs/a.txt      # 删除单个文件
-rm /docs -r         # 递归删除整个目录
+rm /docs -r         # 递归删除整个目录（含目录条目）
 ```
 
-- 删除目录必须带 `-r`，否则提示 `is a directory (N files), use rm -r`
+- 删除目录必须带 `-r`，否则提示 `is a directory (N entries), use rm -r`
 - 删除会回收块/槽位图并重写索引，数据块空间由后续写入复用
 
-### 3.7 `out` — 默认导出根目录
+### 3.8 `out` — 默认导出根目录
 
 ```text
 out                       # 查看当前值与来源（env / config / default）
 out D:\restore            # 设置并写入 .block/config.json（目录会被创建）
 ```
 
-### 3.8 其他
+### 3.9 其他
 
 ```text
 statu        # isfind/iscomplete/haskey/hasload、块使用率、文件数与目录数、out 根
 delete       # 删除整个 .block/（不可恢复）
 help         # 命令列表
-help add     # 单条命令的详细说明
+help add     # 单条命令的详细说明（import / get / ls / rm / out 同样支持）
 exit / quit  # 退出
 ```
+
+### 3.10 中文路径与编码
+
+- 命令行参数按 UTF-16 → UTF-8 处理，**中文路径/文件名直接可用**
+- 交互输入会自动识别 UTF-8 或 GBK
+- 管道/批处理：cmd 先 `chcp 65001`；PowerShell 设 `$OutputEncoding = [Text.Encoding]::UTF8`
+  （Windows PowerShell 5.1 默认 ASCII，中文会变成 `?`）
 
 ---
 
@@ -231,8 +260,10 @@ BlockStorage.exe
 | `Repository incomplete: some files are missing` | `.block/` 下 6 个核心文件缺失 |
 | `Path already exists in repository: /x` | 内部路径重名，换个名字或先 `rm` |
 | `Invalid internal path` | 含 `..`、盘符或空段 |
-| `'...' is a directory (N files), use rm -r` | 删目录要 `-r` |
+| `'...' is a directory (N entries), use rm -r` | 删目录要 `-r` |
 | `No such file or directory in repository: /x` | 不存在（用 `ls / -r` 确认拼写） |
+| `Not a directory: <路径>（单文件请用 add）` | `import` 只接受目录 |
+| `数据变问号（?）` | 管道编码问题：cmd 用 `chcp 65001`，PowerShell 设 `$OutputEncoding` |
 | `Data authentication failed` | 块密文被改动或密钥不符 |
 | `Checksum mismatch` | 还原后 SHA-256 不符（数据损坏） |
 | `Cannot write <路径>` | 目标不可写（权限/只读盘/被占用） |
@@ -252,7 +283,11 @@ BlockStorage.exe
 ## 7. 常见问题
 
 **Q：能不能保留空目录？**
-不能。仓库只索引文件，空目录在导入/导出后会消失。
+可以（v1.0.0 起）。`import` 会为每个子目录建立 `kind:"dir"` 条目，`get` 时原样还原；
+`ls` 里目录行形如 `dir   -   /docs/empty/`。
+
+**Q：`add` 和 `import` 有什么区别？**
+行为一致（都会保留空目录）。`add` 还能接受单个文件，`import` 只接受目录，语义更明确。
 
 **Q：单个文件最大能多大？**
 受限于磁盘与 `uint64` 分块计数；1 GiB 约需 262144 个块，实测按 4 KiB 分块顺序写入即可。
@@ -267,4 +302,8 @@ BlockStorage.exe
 密钥只在内存中保存，不落盘，这是有意的设计。
 
 **Q：中文路径/文件名可以吗？**
-可以。内部路径按 UTF-8 存储；Windows 控制台建议用 `chcp 65001` 避免显示乱码。
+可以。参数走 `wmain`（UTF-16→UTF-8），内部路径按 UTF-8 存储，控制台输出也是 UTF-8。
+注意管道输入：cmd 用 `chcp 65001`，PowerShell 设 `$OutputEncoding = [Text.Encoding]::UTF8`。
+
+**Q：版本号在哪里改？**
+`include/version.h`（`BS_VERSION`）与 `CMakeLists.txt` 的 `project(... VERSION 1.0.0)`。

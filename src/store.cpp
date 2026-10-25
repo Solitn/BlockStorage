@@ -26,6 +26,14 @@ bool file_size_of(const std::string& path, std::uint64_t& out) {
     return true;
 }
 
+bool file_size_of(const fs::path& path, std::uint64_t& out) {
+    std::error_code ec;
+    auto sz = fs::file_size(path, ec);
+    if (ec) return false;
+    out = static_cast<std::uint64_t>(sz);
+    return true;
+}
+
 bool create_area(std::string& err) {
     std::error_code ec;
     const Layout& L = layout();
@@ -35,7 +43,7 @@ bool create_area(std::string& err) {
             return false;
         }
     }
-    for (const std::string& f : {L.index, L.key, L.data, L.small, L.bitmap, L.smbitmap}) {
+    for (const std::string& f : {L.index, L.key, L.data, L.small_data, L.bitmap, L.small_bitmap}) {
         if (path_exists(f)) continue;
         std::ofstream ofs(f, std::ios::binary);
         if (!ofs) {

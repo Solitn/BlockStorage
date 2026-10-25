@@ -1,6 +1,6 @@
 # BlockStorage 架构说明
 
-> v0.1 · C++17 · CMake · OpenSSL 3.5 · nlohmann/json 3.12
+> v1.0.0 · C++17 · CMake · OpenSSL 3.5 · nlohmann/json 3.12
 > 本文档描述**当前实现**（含区块存储引擎），并记录运行时约束与已知限制。
 
 ## 1. 概览
@@ -39,12 +39,14 @@ CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (�
 - **分配**：`bitmap_first_free()` 找首个空位；位图不够长时按 `record_count()` 追加
 - **回收**：删除时清位图；数据区文件不收缩（后续分配会复用空洞）
 
-索引（解密后，v2 起键为内部路径）：
+索引（解密后，v3 起键为内部路径且含目录条目）：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "files": {
+    "/docs":       {"kind": "dir"},
+    "/docs/empty": {"kind": "dir"},
     "/docs/a.bin": {"kind": "blk",   "size": 5000, "sha256": "b64", "blocks": [0, 3]},
     "/docs/b.txt": {"kind": "small", "size": 40,   "sha256": "b64", "slot": 2}
   }
@@ -55,17 +57,25 @@ CLI (REPL)  →  command  →  files (内部路径/索引/分块)  →  store (�
 
 - 统一 `/` 分隔；输入中的 `\` 自动转换
 - `NormalizeInternalPath()` 负责：折叠重复分隔符、拒绝 `.`/`..`/含 `:` 的段、去尾部斜杠
-- 目录不落盘，由文件路径隐式存在（空目录不保留）
-- 旧版 v1 索引（键为 `a.txt`）在 `load_index()` 时统一迁移为 `/a.txt`
+- 目录有两种来源：文件路径的每一级父目录（`ensure_parent_dirs()`），以及显式 `kind:"dir"` 条目（`import` 建立，支持空目录）
+- 旧索引自动迁移：v1 的扁平键 `a.txt` → `/a.txt`；v2 无目录条目，读取时按路径推断
 
 ### 2.2 目录导入 / 导出
 
 | 操作 | 实现 |
 |---|---|
-| 导入 | `add_tree()` 用 `recursive_directory_iterator` 遍历，`fs::relative` 求相对路径，逐个调用 `add_file()` |
-| 导出 | `get_file()` 精确命中→单文件；否则按前缀匹配全部子孙，按相对路径重建目录 |
-| 删除 | `remove_file()` 精确命中→单文件；前缀命中需 `-r`，逐个清位图后统一写索引 |
-| 列表 | `list_files()` 非递归时折叠为"直接子项"（目录 / 文件），递归时列全路径 |
+| 导入 | `add_tree()` 遍历目录：先为每个子目录建 `dir` 条目（含空目录），再逐个文件调用 `add_file()` |
+| 导出 | `get_file()` 精确命中文件→写单文件；精确命中目录或前缀命中→先建目录条目再写文件 |
+| 删除 | `remove_file()` 精确命中文件→删单文件；目录（自身 + 全部子孙）需 `-r`，逐个清位图后统一写索引 |
+| 列表 | `list_files()` 非递归折叠为"直接子项"；递归列出全部条目（含 `dir` 行） |
+
+### 2.3 字符编码
+
+- 入口是 `wmain`：命令行参数 UTF-16 → UTF-8（`WideToUtf8`）
+- 所有本地路径一律 `PathFromUtf8()`（UTF-8 → 宽字符）后再交给 `std::filesystem`，中文路径可用
+- 控制台：`SetConsoleOutputCP/SetConsoleCP(CP_UTF8)`
+- 管道输入：`NormalizeInputEncoding()` 检测非法 UTF-8 时按 ANSI（GBK）解码后转 UTF-8，
+  兼容 cmd 管道与 PowerShell 管道；PowerShell 5.1 仍需设 `$OutputEncoding` 避免上游丢字
 
 ## 3. 密钥与加密
 
@@ -102,10 +112,11 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 |---|---|
 | `init [-p<pwd>] [-s<salt>]` | `create_area()` 建 6 个文件；带 `-p` 时写 `key`，并把派生密钥留在内存 |
 | `load -p<pwd>` | 校验 `SHA256(DeriveKey(pwd,salt))`，成功后 `load_index()` 解密 `idx` |
-| `add <src> [内路径] [-r]` | 文件→`add_file`（尾随 `/` 视为目录，取源文件名）；目录→`add_tree` 递归保留结构 |
-| `get <内路径> [目标]` | 精确命中→单文件；前缀命中→整棵子树；无目标时落 `<out 根>/<内部路径>` |
-| `ls [内路径] [-r]` | `list_files()`：非递归折叠为直接子项，`-r` 列全部 |
-| `rm <内路径> [-r]` | 精确命中→单文件；目录必须 `-r`，批量清位图后统一写索引 |
+| `add <src> [内路径] [-r]` | 文件→`add_file`（尾随 `/` 视为目录，取源文件名）；目录→`add_tree`（含空目录） |
+| `import <目录> [内路径]` | 同 `add_tree`，但强制参数为目录；输出 `Imported N file(s), M dir(s)` |
+| `get <内路径> [目标]` | 精确命中文件→写文件；目录（精确或前缀）→整棵子树，含空目录；无目标时落 `<out 根>/<内部路径>` |
+| `ls [内路径] [-r]` | `list_files()`：非递归折叠为直接子项，`-r` 列全部条目（含 `dir` 行） |
+| `rm <内路径> [-r]` | 精确命中文件→单文件；目录（自身 + 子孙）必须 `-r`，批量清位图后统一写索引 |
 | `out [路径]` | 无参显示（含来源）；有参写入 `.block/config.json` 并建目录 |
 | `statu` | 仓库标志 + 块/槽使用率 + 文件数/目录数 + 导出根 |
 | `help [命令]` | 命令表；带命令名输出 `HELP_DETAILS` 中的详细说明 |
@@ -129,7 +140,6 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 ## 6. 已知限制
 
 - 无密码仓库使用内置固定密钥，**只混淆不保密**
-- 空目录无法保留（索引只记录文件，目录由路径隐式存在）
 - 索引整体在内存中，文件数量极大时 `save_index` 会变慢
 - 数据区只追加不压缩，删除后空间靠位图复用
 - 无并发控制：同一仓库被两个进程同时写入会互相覆盖
@@ -138,14 +148,16 @@ subkey = SHA256(master ‖ domain ‖ block_id_be64)     domain: 1=大块, 2=小
 
 ## 7. 测试
 
-`tests/test.ps1` 覆盖 53 项断言：初始化、8 种尺寸的存取往返（0/1/511/512/513/4096/4097/1 MiB）、
+`tests/test.ps1` 覆盖 **67 项断言**：初始化、8 种尺寸的存取往返（0/1/511/512/513/4096/4097/1 MiB）、
 重复添加、缺失文件、删除、锁定/错误密码/解锁、篡改检测、无密码仓库、删除仓库，
-以及**内部路径与目录树**：整目录导入、显式路径导入、尾部斜杠入目录、目录导出（指定/默认根）、
-`out` 配置与环境变量优先级、`rm` 目录需 `-r`、路径穿越（`..`）拒绝。
+**内部路径与目录树**（整目录导入、显式路径、尾斜杠入目录、目录导出、默认导出根、`out` 配置、
+`rm` 目录需 `-r`、路径穿越拒绝），以及 **v1.0.0 新增**：`import` 完整镜像（含空目录）、
+目录条目 `ls`、空目录还原、精确目录导出、**中文路径导入/导出往返**、版本号横幅。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 -Keep
 ```
 
-> 注意：所有 `.ps1` 文件需保存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会按 GBK 解析中文。
+> 注意 1：所有 `.ps1` 文件需保存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会按 GBK 解析中文。
+> 注意 2：测试通过管道喂命令，脚本内已设 `$OutputEncoding = UTF8`；手工写批处理时 cmd 需 `chcp 65001`。

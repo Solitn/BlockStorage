@@ -19,10 +19,12 @@
 #include "main.h"
 #include "store.h"
 #include "types.h"
+#include "utf8.h"
+#include "version.h"
 
 namespace fs = std::filesystem;
 
-const std::string VER = "0.1";
+const std::string VER = BS_VERSION;
 
 namespace {
 
@@ -49,8 +51,9 @@ Result require_loaded() {
 const std::map<std::string, CommandEntry> COMMANDS = {
     {"init",   {cmd_init,   "init [-p<pwd>] [-s<salt>]        create a repository (optionally encrypted)"}},
     {"load",   {cmd_load,   "load -p<pwd>                     unlock the repository"}},
-    {"add",    {cmd_add,    "add <src> [内路径] [-r]          add a file, or a whole folder with -r"}},
-    {"get",    {cmd_get,    "get <内路径> [目标]               extract a file or a whole folder"}},
+    {"add",    {cmd_add,    "add <源> [内路径] [-r]            add a file, or a folder (keeps subdirs)"}},
+    {"import", {cmd_import, "import <目录> [内路径]            mirror a folder: all files + dirs (incl. empty)"}},
+    {"get",    {cmd_get,    "get <内路径> [目标]               extract a file, a folder or the whole repo"}},
     {"ls",     {cmd_ls,     "ls [内路径] [-r]                  list entries (tree with -r)"}},
     {"rm",     {cmd_rm,     "rm <内路径> [-r]                  remove a file, or a folder with -r"}},
     {"out",    {cmd_out,    "out [路径]                        show / set default extract root"}},
@@ -77,17 +80,26 @@ const std::map<std::string, std::string> HELP_DETAILS = {
      "    省略内路径      -> /<文件名>\n"
      "    内路径以 / 结尾 -> 放入该目录，如 add a.txt /docs/\n"
      "    否则            -> 作为完整内部路径，如 add a.txt /docs/a.txt\n"
-     "  <src> 是文件夹 或 带 -r 时：递归导入其下所有文件。\n"
+     "  <src> 是文件夹时：递归导入其下所有文件与子目录（空目录也会保留）。\n"
      "    省略内路径      -> /<文件夹名>/...\n"
-     "    指定内路径      -> /docs/...（保留子目录结构）\n"
+     "    指定内路径      -> /backup/proj/...（保留子目录结构）\n"
      "  例：add D:\\proj /backup/proj        # D:\\proj 整棵树 -> /backup/proj/..."},
+    {"import",
+     "import <目录> [内路径]\n"
+     "  把一个本地目录完整镜像进仓库：其下所有文件 + 所有子目录（含空目录）。\n"
+     "  与 add <目录> 行为一致；单文件请用 add。\n"
+     "  省略 [内路径] -> /<目录名>/...\n"
+     "  已存在的路径会跳过并计入 skipped，不会覆盖。\n"
+     "  例：import D:\\photos /backup/photos-2026\n"
+     "      import D:\\empty-dir /templates/empty"},
     {"get",
      "get <内路径> [目标]\n"
      "  精确命中文件：导出该文件。\n"
      "    [目标] 省略 -> <out 根目录>/<内路径>\n"
      "    [目标] 是目录 -> <目标>/<文件名>\n"
      "    [目标] 是路径 -> 直接写到该路径\n"
-     "  前缀命中目录：导出整棵子树（保留目录结构）。\n"
+     "  精确命中目录：创建该目录（空目录也能还原）。\n"
+     "  前缀命中目录：导出整棵子树（保留目录结构，含空目录）。\n"
      "    省略 [目标] -> <out 根目录>/<内路径>\n"
      "  例：get /docs                 -> 导出 /docs 下所有文件\n"
      "      get /docs D:\\restore     -> 导出到 D:\\restore/<相对路径>\n"
@@ -96,11 +108,12 @@ const std::map<std::string, std::string> HELP_DETAILS = {
      "ls [内路径] [-r]\n"
      "  不带参数：列出仓库根目录的直接子项（目录带 / 后缀）。\n"
      "  带内路径：列出该目录下的直接子项。\n"
-     "  -r：递归列出全部文件。\n"
+     "  -r：递归列出全部条目（含目录）。\n"
      "  例：ls /            ls /docs -r"},
     {"rm",
      "rm <内路径> [-r]\n"
-     "  删除单个文件；目录需要 -r。删除会回收块位图并更新索引。\n"
+     "  删除单个文件；目录（含其下全部条目）需要 -r。\n"
+     "  删除会回收块位图并更新索引。\n"
      "  例：rm /docs/a.txt        rm /docs -r"},
     {"out",
      "out [路径]\n"
@@ -136,8 +149,8 @@ Result getStatu(const Args& args) {
     res_statu.isfind = true;
 
     res_statu.iscomplete = store::path_exists(L.index) && store::path_exists(L.key) &&
-                           store::path_exists(L.data) && store::path_exists(L.small) &&
-                           store::path_exists(L.bitmap) && store::path_exists(L.smbitmap);
+                           store::path_exists(L.data) && store::path_exists(L.small_data) &&
+                           store::path_exists(L.bitmap) && store::path_exists(L.small_bitmap);
 
     U8list keyfile = read_file(L.key);
     if (keyfile.size() < 64) {
@@ -213,8 +226,14 @@ Result cmd_statu(const Args& args) {
                 std::vector<ListRow> rows;
                 list_files("/", true, rows);
                 std::size_t dirs = 0;
+                std::size_t files = 0;
                 std::set<std::string> seen;
                 for (const ListRow& r : rows) {
+                    if (r.dir) {
+                        seen.insert(r.path);
+                        continue;
+                    }
+                    ++files;
                     std::string p = r.path;
                     std::size_t pos = 0;
                     while ((pos = p.find('/', pos + 1)) != std::string::npos) {
@@ -222,7 +241,7 @@ Result cmd_statu(const Args& args) {
                     }
                 }
                 dirs = seen.size();
-                std::cout << "files      : " << rows.size() << "\n";
+                std::cout << "files      : " << files << "\n";
                 std::cout << "folders    : " << dirs << "\n";
             }
         }
@@ -388,18 +407,52 @@ Result cmd_add(const Args& args) {
     }
     if (src.empty()) return {false, "Usage: add <source> [内路径] [-r]"};
 
+    const fs::path src_path = PathFromUtf8(src);
     std::error_code ec;
-    const bool is_dir = !recursive && fs::is_directory(src, ec);
-    if (is_dir) {
-        if (internal.empty()) internal = "/" + fs::path(src).filename().string();
-        int added = 0;
+    const bool src_is_dir = fs::is_directory(src_path, ec);
+    if (src_is_dir) {
+        if (internal.empty()) internal = "/" + PathToUtf8(src_path.filename());
+        int files = 0;
+        int dirs = 0;
         int failed = 0;
-        return add_tree(src, internal, res_statu.key, added, failed);
+        return add_tree(src, internal, res_statu.key, files, dirs, failed);
     }
-    if (recursive && !fs::is_directory(src, ec)) {
+    if (recursive) {
         return {false, "-r 只能用于文件夹: " + src};
     }
     return add_file(src, internal, res_statu.key);
+}
+
+Result cmd_import(const Args& args) {
+    if (args.size() < 2) return {false, "Usage: import <目录> [内路径]"};
+    Result pre = require_loaded();
+    if (!pre.status) return pre;
+
+    std::string src;
+    std::string internal;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-r" || args[i] == "--recursive") continue;  // 兼容写法
+        if (src.empty()) {
+            src = args[i];
+        } else if (internal.empty()) {
+            internal = args[i];
+        } else {
+            return {false, "Too many arguments, usage: import <目录> [内路径]"};
+        }
+    }
+    if (src.empty()) return {false, "Usage: import <目录> [内路径]"};
+
+    const fs::path src_path = PathFromUtf8(src);
+    std::error_code ec;
+    if (!fs::is_directory(src_path, ec)) {
+        return {false, "Not a directory: " + src + "（单文件请用 add）"};
+    }
+    if (internal.empty()) internal = "/" + PathToUtf8(src_path.filename());
+
+    int files = 0;
+    int dirs = 0;
+    int failed = 0;
+    return add_tree(src, internal, res_statu.key, files, dirs, failed);
 }
 
 Result cmd_get(const Args& args) {

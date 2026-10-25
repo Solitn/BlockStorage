@@ -1,5 +1,9 @@
 #include "config.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -8,6 +12,7 @@
 #include "json.h"
 #include "main.h"
 #include "store.h"
+#include "utf8.h"
 
 namespace fs = std::filesystem;
 
@@ -26,15 +31,15 @@ std::string ConfigFilePath() {
 }
 
 std::string EnvOutputRoot() {
-#ifdef _MSC_VER
-    char* buf = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&buf, &len, "BLOCKSTORAGE_OUT") == 0 && buf != nullptr) {
-        std::string value(buf);
-        free(buf);
-        return value;
-    }
-    return {};
+#ifdef _WIN32
+    // 环境变量可能是非 ASCII，必须走宽字符 API
+    DWORD need = GetEnvironmentVariableW(L"BLOCKSTORAGE_OUT", nullptr, 0);
+    if (need == 0) return {};
+    std::wstring buf(need, L'\0');
+    DWORD got = GetEnvironmentVariableW(L"BLOCKSTORAGE_OUT", buf.data(), need);
+    if (got == 0 || got >= need) return {};
+    buf.resize(got);
+    return WideToUtf8(buf);
 #else
     const char* env = std::getenv("BLOCKSTORAGE_OUT");
     return (env && env[0]) ? std::string(env) : std::string();
@@ -63,9 +68,10 @@ bool EnsureDirectory(const std::string& path, std::string& err) {
         err = "empty path";
         return false;
     }
+    const fs::path dir = PathFromUtf8(path);
     std::error_code ec;
-    fs::create_directories(path, ec);
-    if (ec && !fs::is_directory(path)) {
+    fs::create_directories(dir, ec);
+    if (ec && !fs::is_directory(dir)) {
         err = ec.message();
         return false;
     }

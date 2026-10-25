@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include "json.h"
@@ -20,14 +22,15 @@ struct Layout {
     std::string key     = ".block/key";
     std::string data    = ".block/data.blk";
     std::string bitmap  = ".block/bitmap";
-    std::string small   = ".block/data.small";
-    std::string smbitmap= ".block/bitmap.small";
+    std::string small_data  = ".block/data.small";
+    std::string small_bitmap= ".block/bitmap.small";
 };
 
 const Layout& layout();
 
 bool path_exists(const std::string& path);
 bool file_size_of(const std::string& path, std::uint64_t& out);
+bool file_size_of(const std::filesystem::path& path, std::uint64_t& out);
 
 // 创建 .block 及全部占位文件
 bool create_area(std::string& err);

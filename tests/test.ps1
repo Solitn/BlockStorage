@@ -6,6 +6,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 管道写入子进程的编码：Windows PowerShell 5.1 默认 ASCII，会让中文变成 '?'
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) {
     $Exe = Get-ChildItem (Join-Path $RepoRoot 'build') -Recurse -Filter 'BlockStorage.exe' -ErrorAction SilentlyContinue |
@@ -145,7 +147,7 @@ New-Sample (Join-Path $tree 'sub\deep\c.txt') 3
 
 # 1) 整个文件夹 -> 内部路径 /archive/tree
 $out = Run-Repo @("add $tree /archive/tree", 'ls /archive -r', 'exit')
-Check 'import folder keeps tree' ($out -match 'Imported 3 file\(s\) into /archive/tree')
+Check 'import folder keeps tree' ($out -match 'Imported 3 file\(s\), \d+ dir\(s\) into /archive/tree')
 Check 'ls -r shows nested paths' (($out -match '/archive/tree/sub/deep/c\.txt') -and ($out -match '/archive/tree/sub/b\.bin'))
 
 # 2) 文件 -> 指定内部文件名
@@ -159,7 +161,7 @@ Check 'add file into folder' ($out -match 'Added /notes/a\.txt')
 # 4) 反向：整棵目录导出到指定目录
 $restoreA = Join-Path $Work 'restoreA'
 $out = Run-Repo @("get /archive $restoreA", 'exit')
-Check 'export folder reports count' ($out -match 'Extracted 3 file\(s\) from /archive')
+Check 'export folder reports count' ($out -match 'Extracted 3 file\(s\), \d+ dir\(s\) from /archive')
 Check 'exported nested file exists' (Test-Path (Join-Path $restoreA 'tree\sub\deep\c.txt'))
 Check 'exported content matches' ((Get-FileHash (Join-Path $tree 'sub\b.bin')).Hash -eq
                                   (Get-FileHash (Join-Path $restoreA 'tree\sub\b.bin')).Hash)
@@ -184,11 +186,59 @@ $env:BLOCKSTORAGE_OUT = $saved
 # 7) rm 目录：不带 -r 拒绝，带 -r 删除
 $out = Run-Repo @('rm /archive', 'rm /archive -r', 'ls /archive -r', 'exit')
 Check 'rm dir needs -r' ($out -match 'is a directory.*use rm -r')
-Check 'rm -r removes subtree' ($out -match 'Removed 3 file\(s\) under /archive')
+Check 'rm -r removes subtree' ($out -match 'Removed \d+ entries under /archive')
 
 # 8) 非法内部路径
 $out = Run-Repo @("add $tree\a.txt /a/../b", 'exit')
 Check 'path traversal rejected' ($out -match 'Invalid internal path')
+
+Write-Host "== import（文件 + 目录，含空目录）==" -ForegroundColor Cyan
+$mirror = Join-Path $Work 'mirror'
+New-Item -ItemType Directory -Path (Join-Path $mirror 'src\empty'), (Join-Path $mirror 'emptydir') -Force | Out-Null
+New-Sample (Join-Path $mirror 'src\a.cpp') 12
+New-Sample (Join-Path $mirror 'root.txt') 5
+
+$out = Run-Repo @("import $mirror /m", 'ls /m -r', 'exit')
+Check 'import reports files and dirs' ($out -match 'Imported 2 file\(s\), 4 dir\(s\)')
+Check 'import creates dir entries' ($out -match 'dir\s+-\s+/m/emptydir/')
+Check 'import keeps nested empty dir' ($out -match '/m/src/empty/')
+
+$mirrorOut = Join-Path $Work 'mirror-restore'
+$out = Run-Repo @("get /m $mirrorOut", 'exit')
+Check 'export counts files and dirs' ($out -match 'Extracted 2 file\(s\), 3 dir\(s\)')
+Check 'empty dir restored' (Test-Path (Join-Path $mirrorOut 'emptydir'))
+Check 'nested empty dir restored' (Test-Path (Join-Path $mirrorOut 'src\empty'))
+Check 'file restored' ((Get-FileHash (Join-Path $mirror 'root.txt')).Hash -eq
+                       (Get-FileHash (Join-Path $mirrorOut 'root.txt')).Hash)
+
+# 目录单独导出：精确命中目录条目时也应导出整棵树
+$onlyEmpty = Join-Path $Work 'only-empty'
+$out = Run-Repo @("get /m/emptydir $onlyEmpty", 'exit')
+Check 'exact dir export works' ($out -match 'Created directory|Extracted 0 file\(s\)')
+
+$out = Run-Repo @('rm /m', 'rm /m -r', 'exit')
+Check 'rm dir needs -r (entries)' ($out -match 'is a directory .*entries.*use rm -r')
+Check 'rm -r removes tree' ($out -match 'Removed 6 entries under /m')
+
+Write-Host "== 中文路径 ==" -ForegroundColor Cyan
+$cn = Join-Path $Work '中文目录'
+New-Item -ItemType Directory -Path (Join-Path $cn '子目录') -Force | Out-Null
+Set-Content -Path (Join-Path $cn '说明.txt') -Value '中文内容' -Encoding UTF8
+Set-Content -Path (Join-Path $cn '子目录\代码.cpp') -Value 'int main(){}' -Encoding UTF8
+
+$out = Run-Repo @("import $cn /备份/中文目录", 'ls /备份 -r', 'exit')
+Check 'import chinese dir' ($out -match 'Imported 2 file\(s\)')
+Check 'ls shows chinese paths' ($out -match '/备份/中文目录/子目录/代码\.cpp')
+
+$cnOut = Join-Path $Work '中文还原'
+$out = Run-Repo @("get /备份 $cnOut", 'exit')
+$cnFile = Join-Path $cnOut '中文目录\子目录\代码.cpp'
+Check 'chinese round-trip' ((Test-Path $cnFile) -and
+                            ((Get-Content $cnFile -Raw) -eq (Get-Content (Join-Path $cn '子目录\代码.cpp') -Raw)))
+
+Write-Host "== 版本号 ==" -ForegroundColor Cyan
+$out = Run-Repo -NoLoad @('exit')
+Check 'banner shows v1.0.0' ($out -match 'BlockStorage v1\.0\.0')
 
 Write-Host "== no-password repository ==" -ForegroundColor Cyan
 $plain = Join-Path $Work 'plain'
