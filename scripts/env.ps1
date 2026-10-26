@@ -30,10 +30,6 @@ $sdkLibRoot = Join-Path $script:Tools 'sdk\Lib'
 $sdkVer = Find-Dir $sdkIncRoot
 $sdkLibVer = Find-Dir $sdkLibRoot
 
-# ---------- OpenSSL ----------
-$openssl = Join-Path $script:Tools 'openssl\x64'
-if (-not (Test-Path $openssl)) { $openssl = Join-Path $script:Tools 'openssl' }
-
 # ---------- CMake ----------
 $cmakeBin = Join-Path $script:Tools 'cmake\bin'
 
@@ -41,8 +37,6 @@ if (-not $msvc) { Write-Warning 'MSVC 未找到：先运行 python scripts\fetch
 if (-not $sdkVer) { Write-Warning 'Windows SDK 未找到：先运行 python scripts\fetch_msvc.py sdk' }
 
 $env:VCToolsInstallDir = if ($msvc) { "$($msvc.FullName)\" } else { '' }
-$env:OPENSSL_ROOT_DIR  = $openssl
-$env:OPENSSL_DIR       = $openssl
 
 $incParts = @()
 $libParts = @()
@@ -59,15 +53,11 @@ if ($sdkLibVer) {
         if (Test-Path $p) { $libParts += $p }
     }
 }
-$incParts += (Join-Path $openssl 'include')
-$libParts += (Join-Path $openssl 'lib')
-
 $env:INCLUDE = ($incParts -join ';')
 $env:LIB     = ($libParts -join ';')
 
 $pathParts = @()
 if ($msvc) { $pathParts += (Join-Path $msvc.FullName 'bin\HostX64\x64') }
-$pathParts += (Join-Path $openssl 'bin')
 $pathParts += $cmakeBin
 $pathParts += (Join-Path $script:Tools 'sdk\bin')
 $pathParts += (Join-Path $script:Tools 'ninja')
@@ -85,6 +75,5 @@ if (-not $env:BLOCKSTORAGE_OUT) {
 
 Write-Host "MSVC    : $(if ($msvc) { $msvc.FullName } else { '<missing>' })" -ForegroundColor DarkGray
 Write-Host "SDK     : $(if ($sdkVer) { $sdkVer.FullName } else { '<missing>' })" -ForegroundColor DarkGray
-Write-Host "OpenSSL : $openssl" -ForegroundColor DarkGray
 Write-Host "CMake   : $(Join-Path $cmakeBin 'cmake.exe')" -ForegroundColor DarkGray
 Write-Host "BS out  : $env:BLOCKSTORAGE_OUT" -ForegroundColor DarkGray

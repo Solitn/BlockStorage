@@ -65,6 +65,8 @@ tools/
 ai.md
 AI.md
 .tmp/
+keys/
+.ssh/
 *.log
 *.tmp
 .DS_Store
