@@ -13,10 +13,11 @@ namespace store {
 namespace {
 
 // bit 文件头：magic(8) | version(4) | node_size(4) | 8 x 8 字段 | 保留(16) = 96
-constexpr char kBitMagic[8] = {'B', 'S', 'B', 'I', 'T', '0', '0', '1'};
-constexpr std::uint32_t kBitVersion = 1;
-constexpr std::uint32_t kBitNodeSize = 8;
+constexpr char kBitMagic[8] = {'B', 'S', 'B', 'I', 'T', '0', '0', '2'};
+constexpr std::uint32_t kBitVersion = 2;
+constexpr std::uint32_t kBitNodeSize = 4;
 constexpr std::size_t kBitHeader = 96;
+constexpr std::uint32_t kNoLink = 0xFFFFFFu;  // 24 位链尾标记
 
 void put_u32(U8list& out, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
@@ -44,6 +45,22 @@ std::uint64_t get_u64(const U8list& in, std::size_t off) {
 
 std::int64_t get_i64(const U8list& in, std::size_t off) {
     return static_cast<std::int64_t>(get_u64(in, off));
+}
+
+// 节点：块号 3 字节小端 + 状态 1 字节
+void put_node(U8list& out, std::int32_t link, std::uint8_t state) {
+    const std::uint32_t v = (link < 0) ? kNoLink : static_cast<std::uint32_t>(link);
+    out.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<std::uint8_t>((v >> 16) & 0xFF));
+    out.push_back(state);
+}
+
+std::int32_t get_link(const U8list& in, std::size_t off) {
+    const std::uint32_t v = static_cast<std::uint32_t>(in[off]) |
+                            (static_cast<std::uint32_t>(in[off + 1]) << 8) |
+                            (static_cast<std::uint32_t>(in[off + 2]) << 16);
+    return (v == kNoLink) ? -1 : static_cast<std::int32_t>(v);
 }
 
 }  // namespace
@@ -110,11 +127,11 @@ bool BitTable::load(const std::string& path, std::string& err) {
         return false;
     }
     if (std::memcmp(raw.data(), kBitMagic, sizeof(kBitMagic)) != 0) {
-        err = "bit file has a bad magic";
+        err = "unsupported bit file format (re-init the repository)";
         return false;
     }
     if (get_u32(raw, 8) != kBitVersion || get_u32(raw, 12) != kBitNodeSize) {
-        err = "unsupported bit file format";
+        err = "unsupported bit file format (re-init the repository)";
         return false;
     }
 
@@ -129,20 +146,76 @@ bool BitTable::load(const std::string& path, std::string& err) {
 
     std::size_t off = kBitHeader;
     for (int tier = 0; tier < kTierCount; ++tier) {
-        if (off > raw.size() || cap[tier] > (raw.size() - off) / kBitNodeSize) {
-            err = "bit file is truncated";
+        if (cap[tier] > kBitMaxBlocks) {
+            err = "bit file has too many blocks";
             return false;
-        }
-        nodes[tier].resize(static_cast<std::size_t>(cap[tier]), -1);
-        for (std::uint64_t i = 0; i < cap[tier]; ++i) {
-            nodes[tier][static_cast<std::size_t>(i)] = get_i64(raw, off);
-            off += kBitNodeSize;
         }
         if (free_count[tier] > cap[tier]) {
             err = "bit file has an inconsistent free count";
             return false;
         }
         if ((head[tier] == -1) != (tail[tier] == -1)) {
+            err = "bit file has an inconsistent free list";
+            return false;
+        }
+        if (head[tier] == -1 && free_count[tier] != 0) {
+            err = "bit file has an inconsistent free list";
+            return false;
+        }
+        if (head[tier] != -1 && free_count[tier] == 0) {
+            err = "bit file has an inconsistent free list";
+            return false;
+        }
+        if (off > raw.size() || cap[tier] > (raw.size() - off) / kBitNodeSize) {
+            err = "bit file is truncated";
+            return false;
+        }
+
+        link[tier].resize(static_cast<std::size_t>(cap[tier]), -1);
+        state[tier].resize(static_cast<std::size_t>(cap[tier]), 0);
+        std::uint64_t free_nodes = 0;
+        for (std::uint64_t i = 0; i < cap[tier]; ++i) {
+            const std::int32_t l = get_link(raw, off);
+            const std::uint8_t st = raw[off + 3];
+            off += kBitNodeSize;
+            if (st > 1) {
+                err = "bit file has a bad node state";
+                return false;
+            }
+            if (l != -1 && static_cast<std::uint64_t>(l) >= cap[tier]) {
+                err = "bit file has a block link out of range";
+                return false;
+            }
+            link[tier][static_cast<std::size_t>(i)] = l;
+            state[tier][static_cast<std::size_t>(i)] = st;
+            if (st == 0) ++free_nodes;
+        }
+        if (free_nodes != free_count[tier]) {
+            err = "bit file has an inconsistent free count";
+            return false;
+        }
+
+        // 走一遍空闲链，检查环 / 跳转 / 链尾
+        std::int64_t cur = head[tier];
+        std::int64_t last = -1;
+        std::uint64_t steps = 0;
+        while (cur != -1) {
+            if (++steps > free_count[tier]) {
+                err = "bit file has a cyclic free list";
+                return false;
+            }
+            if (cur < 0 || static_cast<std::uint64_t>(cur) >= cap[tier]) {
+                err = "bit file has a block link out of range";
+                return false;
+            }
+            if (state[tier][static_cast<std::size_t>(cur)] != 0) {
+                err = "bit file has an inconsistent free list";
+                return false;
+            }
+            last = cur;
+            cur = link[tier][static_cast<std::size_t>(cur)];
+        }
+        if (steps != free_count[tier] || (free_count[tier] > 0 && last != tail[tier])) {
             err = "bit file has an inconsistent free list";
             return false;
         }
@@ -167,7 +240,12 @@ bool BitTable::save(const std::string& path, std::string& err) const {
     put_i64(raw, tail[1]);
     raw.resize(kBitHeader, 0);  // 保留字段
     for (int tier = 0; tier < kTierCount; ++tier) {
-        for (std::int64_t v : nodes[tier]) put_i64(raw, v);
+        const std::size_t n = static_cast<std::size_t>(cap[tier]);
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::int32_t l = (i < link[tier].size()) ? link[tier][i] : -1;
+            const std::uint8_t st = (i < state[tier].size()) ? state[tier][i] : 0;
+            put_node(raw, l, st);
+        }
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -187,30 +265,34 @@ std::int64_t BitTable::alloc(int tier) {
     if (!valid_tier(tier)) return -1;
     if (head[tier] >= 0 && static_cast<std::uint64_t>(head[tier]) < cap[tier]) {
         const std::int64_t id = head[tier];
-        head[tier] = nodes[tier][static_cast<std::size_t>(id)];
+        head[tier] = link[tier][static_cast<std::size_t>(id)];
         if (head[tier] < 0) tail[tier] = -1;
         if (free_count[tier] > 0) --free_count[tier];
-        nodes[tier][static_cast<std::size_t>(id)] = -1;
+        link[tier][static_cast<std::size_t>(id)] = -1;
+        state[tier][static_cast<std::size_t>(id)] = 1;
         return id;
     }
-    // 空闲链为空：扩展一个新的块号
-    head[tier] = -1;
-    tail[tier] = -1;
+    // 空闲链为空：扩展一个新的块号（块号 24 位，0xFFFFFF 留给链尾）
+    if (head[tier] != -1) return -1;  // 链首异常，拒绝继续分配
+    if (cap[tier] >= kBitMaxBlocks) return -1;
     const std::int64_t id = static_cast<std::int64_t>(cap[tier]);
     ++cap[tier];
-    nodes[tier].push_back(-1);
+    link[tier].push_back(-1);
+    state[tier].push_back(1);
     return id;
 }
 
 bool BitTable::release(int tier, std::int64_t id) {
     if (!valid_tier(tier)) return false;
     if (id < 0 || static_cast<std::uint64_t>(id) >= cap[tier]) return false;
-    nodes[tier][static_cast<std::size_t>(id)] = -1;
+    if (state[tier][static_cast<std::size_t>(id)] == 0) return false;  // 已经是空闲：重复释放
+    link[tier][static_cast<std::size_t>(id)] = -1;
+    state[tier][static_cast<std::size_t>(id)] = 0;
     if (tail[tier] == -1) {
         head[tier] = id;
         tail[tier] = id;
     } else {
-        nodes[tier][static_cast<std::size_t>(tail[tier])] = id;
+        link[tier][static_cast<std::size_t>(tail[tier])] = static_cast<std::int32_t>(id);
         tail[tier] = id;
     }
     ++free_count[tier];
@@ -220,13 +302,19 @@ bool BitTable::release(int tier, std::int64_t id) {
 std::int64_t BitTable::next_of(int tier, std::int64_t id) const {
     if (!valid_tier(tier)) return -1;
     if (id < 0 || static_cast<std::uint64_t>(id) >= cap[tier]) return -1;
-    return nodes[tier][static_cast<std::size_t>(id)];
+    return link[tier][static_cast<std::size_t>(id)];
 }
 
 void BitTable::set_next(int tier, std::int64_t id, std::int64_t v) {
     if (!valid_tier(tier)) return;
     if (id < 0 || static_cast<std::uint64_t>(id) >= cap[tier]) return;
-    nodes[tier][static_cast<std::size_t>(id)] = v;
+    link[tier][static_cast<std::size_t>(id)] = static_cast<std::int32_t>(v);
+}
+
+bool BitTable::is_used(int tier, std::int64_t id) const {
+    if (!valid_tier(tier)) return false;
+    if (id < 0 || static_cast<std::uint64_t>(id) >= cap[tier]) return false;
+    return state[tier][static_cast<std::size_t>(id)] != 0;
 }
 
 // ---------------------------------------------------------------- 定长记录

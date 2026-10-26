@@ -56,8 +56,17 @@ function Run-Repo {
 }
 
 function New-Sample([string]$path, [int]$size) {
+    # ((i*31+7) % 251) 以 251 为周期；用整周期块拼接，避免大文件逐字节循环
+    $period = 251
+    $chunk = New-Object byte[] ($period * 4096)
+    for ($i = 0; $i -lt $chunk.Length; $i++) { $chunk[$i] = [byte](($i * 31 + 7) % 251) }
     $bytes = New-Object byte[] $size
-    for ($i = 0; $i -lt $size; $i++) { $bytes[$i] = [byte](($i * 31 + 7) % 251) }
+    $off = 0
+    while ($off -lt $size) {
+        $n = [Math]::Min($chunk.Length, $size - $off)
+        [Array]::Copy($chunk, 0, $bytes, $off, $n)
+        $off += $n
+    }
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
@@ -91,6 +100,9 @@ foreach ($k in $sizes.Keys) { Check "add $k" ($out -match [regex]::Escape("Added
 $lsRows = ($out -split "`n") | Where-Object { $_ -match '^file\s+\d+\s+/' }
 Check 'ls lists 8 files' ($lsRows.Count -eq 8) "got $($lsRows.Count)"
 Check 'index is encrypted (no plain names)' (-not ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Work '.block\idx'))) -match 'big\.bin'))
+# bit：96 字节头 + 每块 4 字节；此时小块 3 块（s4096、s4097x2）+ 大块 4 块
+$bitLen = (Get-Item (Join-Path $Work '.block\bit')).Length
+Check 'bit node is 4 bytes' ($bitLen -eq (96 + 4 * 7)) "got $bitLen"
 
 Write-Host "== get (round-trip, structure kept) ==" -ForegroundColor Cyan
 $lines = @()
@@ -174,6 +186,20 @@ $bigRestored = Join-Path $tierOut 't262145'
 Check 'big-block round-trip' ((Test-Path $bigRestored) -and
                               ((Get-FileHash (Join-Path $tier 't262145.bin')).Hash -eq
                                (Get-FileHash $bigRestored).Hash))
+
+Write-Host "== 单文件多块（长链）==" -ForegroundColor Cyan
+$many = Join-Path $Work 'many.bin'
+New-Sample $many (5 * 1024 * 1024)
+$out = Run-Repo @("add $many /many.bin", 'statu', 'exit')
+Check '5 MiB -> 20 x256k' ($out -match 'Added /many\.bin \(5242880 bytes, 20 x256k\)')
+Check '20 blocks counted' ($out -match 'big blocks : \d+ / \d+ used')
+$manyOut = Join-Path $Work 'many-out'
+New-Item -ItemType Directory -Path $manyOut -Force | Out-Null
+$out = Run-Repo @("get /many.bin $manyOut", 'exit')
+Check '20-block round-trip' ((Test-Path (Join-Path $manyOut 'many.bin')) -and
+                             ((Get-FileHash $many).Hash -eq (Get-FileHash (Join-Path $manyOut 'many.bin')).Hash))
+$out = Run-Repo @('rm /many.bin', 'exit')
+Check 'long chain freed' ($out -match 'Removed /many\.bin')
 
 Write-Host "== directory tree (内部路径) ==" -ForegroundColor Cyan
 $tree = Join-Path $Work 'tree'
