@@ -63,6 +63,8 @@ tools/
 
 # ---------- Local scratch / OS files ----------
 ai.md
+AI.md
+.tmp/
 *.log
 *.tmp
 .DS_Store
