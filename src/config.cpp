@@ -6,12 +6,9 @@
 
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <string>
 
-#include "json.h"
-#include "main.h"
-#include "store.h"
+#include "files.h"
 #include "utf8.h"
 
 namespace fs = std::filesystem;
@@ -29,10 +26,6 @@ std::string DefaultOutputRoot() {
     if (ec) return std::string(kExtractDirName);
     cwd /= kExtractDirName;
     return PathToUtf8(cwd);
-}
-
-std::string ConfigFilePath() {
-    return store::layout().dir + "/config.json";
 }
 
 std::string EnvOutputRoot() {
@@ -55,16 +48,10 @@ std::string OutputRoot() {
     const std::string from_env = EnvOutputRoot();
     if (!from_env.empty()) return from_env;
 
-    const std::string cfg_path = ConfigFilePath();
-    std::ifstream in(cfg_path, std::ios::binary);
-    if (in) {
-        json j = json::parse(in, nullptr, false);
-        if (!j.is_null() && j.is_object() && j.contains("output_root") &&
-            j["output_root"].is_string()) {
-            std::string v = j["output_root"].get<std::string>();
-            if (!v.empty()) return v;
-        }
-    }
+    // config 与索引合并：导出根存在加密的 idx 里
+    const std::string from_index = IndexOutputRoot();
+    if (!from_index.empty()) return from_index;
+
     return DefaultOutputRoot();
 }
 
@@ -89,27 +76,5 @@ bool SetOutputRoot(const std::string& path, std::string& err) {
         return false;
     }
     if (!EnsureDirectory(path, err)) return false;
-
-    const std::string cfg_path = ConfigFilePath();
-    json j = json::object();
-    {
-        std::ifstream in(cfg_path, std::ios::binary);
-        if (in) {
-            json old = json::parse(in, nullptr, false);
-            if (old.is_object()) j = old;
-        }
-    }
-    j["output_root"] = path;
-
-    std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        err = "cannot write " + cfg_path;
-        return false;
-    }
-    out << j.dump(2);
-    if (!out.good()) {
-        err = "cannot write " + cfg_path;
-        return false;
-    }
-    return true;
+    return SetIndexOutputRoot(path);
 }

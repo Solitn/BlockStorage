@@ -1,5 +1,5 @@
-﻿# BlockStorage 端到端测试
-# 用法： pwsh -ExecutionPolicy Bypass -File .\tests\test.ps1 [-Exe <path>] [-Keep]
+﻿# BlockStorage 端到端测试（索引 v5：目录树 + bit 链）
+# 用法： powershell -ExecutionPolicy Bypass -File .\tests\test.ps1 [-Exe <path>] [-Keep]
 param(
     [string]$Exe = '',
     [switch]$Keep
@@ -30,7 +30,6 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
     }
 }
 
-# 每次启动都是新进程：默认先 load 解锁
 function Run-Repo {
     param(
         [string[]]$Lines,
@@ -66,7 +65,6 @@ function New-Sample([string]$path, [int]$size) {
 if (Test-Path $Work) { Remove-Item $Work -Recurse -Force }
 New-Item -ItemType Directory -Path $Work, (Join-Path $Work 'src'), (Join-Path $Work 'out') -Force | Out-Null
 
-# 默认导出根目录走环境变量（避免写到 C:\），同时测试 env 优先级
 $env:BLOCKSTORAGE_OUT = Join-Path $Work 'dropped'
 
 $sizes = [ordered]@{ 'empty.bin' = 0; 'one.bin' = 1; 's511.bin' = 511; 's512.bin' = 512;
@@ -76,7 +74,11 @@ foreach ($k in $sizes.Keys) { New-Sample (Join-Path $Work "src\$k") $sizes[$k] }
 Write-Host "== init ==" -ForegroundColor Cyan
 $out = Run-Repo -NoLoad @('init -pS3cret!', 'statu', 'exit')
 Check 'init reports success' ($out -match 'Repository initialized')
-Check 'repository created' (Test-Path (Join-Path $Work '.block\data.blk'))
+Check 'repository has 5 files' ((Get-ChildItem (Join-Path $Work '.block') -File).Count -eq 5)
+foreach ($f in 'idx', 'key', 'data.blk', 'data.small', 'bit') {
+    Check "file $f exists" (Test-Path (Join-Path $Work ".block\$f"))
+}
+Check 'no config.json' (-not (Test-Path (Join-Path $Work '.block\config.json')))
 Check 'statu shows haskey' ($out -match 'haskey\s+:\s+true')
 Check 'statu shows hasload' ($out -match 'hasload\s+:\s+true')
 
@@ -88,8 +90,9 @@ $out = Run-Repo ($lines + 'exit')
 foreach ($k in $sizes.Keys) { Check "add $k" ($out -match [regex]::Escape("Added /$k")) }
 $lsRows = ($out -split "`n") | Where-Object { $_ -match '^file\s+\d+\s+/' }
 Check 'ls lists 8 files' ($lsRows.Count -eq 8) "got $($lsRows.Count)"
+Check 'index is encrypted (no plain names)' (-not ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Work '.block\idx'))) -match 'big\.bin'))
 
-Write-Host "== get (round-trip) ==" -ForegroundColor Cyan
+Write-Host "== get (round-trip, structure kept) ==" -ForegroundColor Cyan
 $lines = @()
 foreach ($k in $sizes.Keys) { $lines += "get $k out\$k" }
 $out = Run-Repo ($lines + 'exit')
@@ -99,18 +102,27 @@ foreach ($k in $sizes.Keys) {
     $same = (Test-Path $dst) -and ((Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash)
     Check "round-trip $k ($($sizes[$k]) B)" $same
 }
+# 目标是已存在的目录：保留仓库内完整路径
+$dirTarget = Join-Path $Work 'outdir'
+New-Item -ItemType Directory -Path $dirTarget -Force | Out-Null
+$out = Run-Repo @('get /one.bin outdir', 'exit')
+Check 'dir target keeps full path' (Test-Path (Join-Path $dirTarget 'one.bin'))
 
 Write-Host "== duplicate / missing ==" -ForegroundColor Cyan
 $out = Run-Repo @('add src\one.bin', 'get nope.bin x.bin', 'rm nope.bin', 'exit')
-Check 'duplicate rejected' ($out -match 'Duplicate path|already exists')
+Check 'duplicate rejected' ($out -match 'Duplicate path')
 Check 'missing get rejected' ($out -match 'No such file')
 Check 'missing rm rejected' ($out -match 'No such file')
 
-Write-Host "== delete / remove ==" -ForegroundColor Cyan
-$out = Run-Repo @('rm big.bin', 'ls', 'exit')
+Write-Host "== delete / remove + block reuse ==" -ForegroundColor Cyan
+$out = Run-Repo @('rm big.bin', 'ls', 'statu', 'exit')
 Check 'rm works' ($out -match 'Removed /big.bin')
 $lsRows = ($out -split "`n") | Where-Object { $_ -match '^file\s+\d+\s+/' }
 Check 'ls no longer lists big.bin' (-not ($lsRows -match '/big\.bin'))
+Check 'blocks are freed' ($out -match 'big blocks : 0 / 4 used')
+
+$out = Run-Repo @('add src\big.bin /big.bin', 'statu', 'exit')
+Check 'freed middle blocks reused' ($out -match 'big blocks : 4 / 4 used')
 
 Write-Host "== lock / unlock ==" -ForegroundColor Cyan
 $out = Run-Repo -NoLoad @('ls', 'exit')
@@ -124,9 +136,8 @@ Check 'ls works after unlock' ($out -match 'one\.bin')
 Write-Host "== tamper detection ==" -ForegroundColor Cyan
 $data = Join-Path $Work '.block\data.small'
 $bytes = [IO.File]::ReadAllBytes($data)
-Check 'data.small has content' ($bytes.Length -gt 4200)
-if ($bytes.Length -gt 4200) {
-    # 4 KiB 小块区：第 2 块（偏移 4124）属于 s4096.bin
+Check 'data.small has content' ($bytes.Length -gt 4124)
+if ($bytes.Length -gt 4124) {
     $off = 100   # 第 1 个 4 KiB 块属于 s4096.bin
     $bytes[$off] = $bytes[$off] -bxor 0xFF
     [IO.File]::WriteAllBytes($data, $bytes)
@@ -154,12 +165,15 @@ Check '256 KiB + 1 -> 256k' ($out -match 'Added /t262145 \(262145 bytes, 2 x256k
 $out = Run-Repo @('statu', 'exit')
 Check 'statu shows inline count' ($out -match 'inline\s+:\s+\d+ file')
 Check 'statu shows 256 KiB blocks' ($out -match 'big blocks\s*:\s*\d+ / \d+ used \(256 KiB each\)')
+Check 'statu shows file/folder counts' (($out -match 'files\s+:\s+\d+') -and ($out -match 'folders\s+:\s+\d+'))
 
 $tierOut = Join-Path $Work 'tier-out'
-$out = Run-Repo @("get /t262145 $tierOut\t262145.bin", 'exit')
-Check 'big-block round-trip' ((Test-Path (Join-Path $tierOut 't262145.bin')) -and
+New-Item -ItemType Directory -Path $tierOut -Force | Out-Null
+$out = Run-Repo @("get /t262145 $tierOut", 'exit')
+$bigRestored = Join-Path $tierOut 't262145'
+Check 'big-block round-trip' ((Test-Path $bigRestored) -and
                               ((Get-FileHash (Join-Path $tier 't262145.bin')).Hash -eq
-                               (Get-FileHash (Join-Path $tierOut 't262145.bin')).Hash))
+                               (Get-FileHash $bigRestored).Hash))
 
 Write-Host "== directory tree (内部路径) ==" -ForegroundColor Cyan
 $tree = Join-Path $Work 'tree'
@@ -181,20 +195,20 @@ Check 'add file to explicit path' ($out -match 'Added /notes/hello\.txt')
 $out = Run-Repo @("add $tree\a.txt /notes/", 'ls /notes -r', 'exit')
 Check 'add file into folder' ($out -match 'Added /notes/a\.txt')
 
-# 4) 反向：整棵目录导出到指定目录
+# 4) 反向：整棵目录导出到指定目录（保留 /archive 这一层）
 $restoreA = Join-Path $Work 'restoreA'
 $out = Run-Repo @("get /archive $restoreA", 'exit')
 Check 'export folder reports count' ($out -match 'Extracted 3 file\(s\), \d+ dir\(s\) from /archive')
-Check 'exported nested file exists' (Test-Path (Join-Path $restoreA 'tree\sub\deep\c.txt'))
+Check 'exported nested file exists' (Test-Path (Join-Path $restoreA 'archive\tree\sub\deep\c.txt'))
 Check 'exported content matches' ((Get-FileHash (Join-Path $tree 'sub\b.bin')).Hash -eq
-                                  (Get-FileHash (Join-Path $restoreA 'tree\sub\b.bin')).Hash)
+                                  (Get-FileHash (Join-Path $restoreA 'archive\tree\sub\b.bin')).Hash)
 
 # 5) 反向：不带目标 -> 使用默认导出根（环境变量 BLOCKSTORAGE_OUT）
 $out = Run-Repo @('get /archive/tree/sub/deep/c.txt', 'exit')
 $defaultFile = Join-Path $Work 'dropped\archive\tree\sub\deep\c.txt'
 Check 'default out root used' (Test-Path $defaultFile)
 
-# 6) out 命令：显示 / 设置
+# 6) out 命令：显示 / 设置（config 并入 idx）
 $out = Run-Repo @('out', 'exit')
 Check 'out shows env source' ($out -match 'BLOCKSTORAGE_OUT')
 $cfgOut = Join-Path $Work 'cfgout'
@@ -202,14 +216,15 @@ $saved = $env:BLOCKSTORAGE_OUT
 Remove-Item Env:\BLOCKSTORAGE_OUT -ErrorAction SilentlyContinue
 $out = Run-Repo -NoLoad @("load -p$Pwd0", "out $cfgOut", 'out', 'exit')
 Check 'out sets config' ($out -match 'Default extract root set')
-Check 'config file written' (Test-Path (Join-Path $Work '.block\config.json'))
-Check 'config source reported' ($out -match '\.block/config\.json')
+Check 'config merged into idx' (-not (Test-Path (Join-Path $Work '.block\config.json')))
+Check 'config source reported' ($out -match '\.block/idx')
 $env:BLOCKSTORAGE_OUT = $saved
 
 # 7) rm 目录：不带 -r 拒绝，带 -r 删除
 $out = Run-Repo @('rm /archive', 'rm /archive -r', 'ls /archive -r', 'exit')
 Check 'rm dir needs -r' ($out -match 'is a directory.*use rm -r')
 Check 'rm -r removes subtree' ($out -match 'Removed \d+ entries under /archive')
+Check 'removed dir is gone' ($out -match 'No such file or directory')
 
 # 8) 非法内部路径
 $out = Run-Repo @("add $tree\a.txt /a/../b", 'exit')
@@ -227,7 +242,7 @@ $out = Run-Repo @("add $dup\src\x.txt /Case/File.txt",
                   "add $dup\src\y.txt /Case/File.txt",
                   'ls /Case', 'exit')
 Check 'first add ok' ($out -match 'Added /Case/File\.txt')
-Check 'duplicate (same path, other case) blocked' ($out -match 'Duplicate path: /case/file\.txt conflicts with existing /Case/File\.txt'.Replace('\.txt','\.txt'))
+Check 'duplicate (same path, other case) blocked' ($out -match 'Duplicate path: /case/file\.txt conflicts with existing /Case/File\.txt')
 Check 'duplicate (upper case) blocked' ($out -match 'conflicts with existing /Case/File\.txt')
 Check 'file vs file duplicate blocked twice' (([regex]::Matches($out, 'Duplicate path:').Count) -eq 3)
 
@@ -269,15 +284,15 @@ Check 'import keeps nested empty dir' ($out -match '/m/src/empty/')
 $mirrorOut = Join-Path $Work 'mirror-restore'
 $out = Run-Repo @("get /m $mirrorOut", 'exit')
 Check 'export counts files and dirs' ($out -match 'Extracted 2 file\(s\), 3 dir\(s\)')
-Check 'empty dir restored' (Test-Path (Join-Path $mirrorOut 'emptydir'))
-Check 'nested empty dir restored' (Test-Path (Join-Path $mirrorOut 'src\empty'))
+Check 'empty dir restored' (Test-Path (Join-Path $mirrorOut 'm\emptydir'))
+Check 'nested empty dir restored' (Test-Path (Join-Path $mirrorOut 'm\src\empty'))
 Check 'file restored' ((Get-FileHash (Join-Path $mirror 'root.txt')).Hash -eq
-                       (Get-FileHash (Join-Path $mirrorOut 'root.txt')).Hash)
+                       (Get-FileHash (Join-Path $mirrorOut 'm\root.txt')).Hash)
 
 # 目录单独导出：精确命中目录条目时也应导出整棵树
 $onlyEmpty = Join-Path $Work 'only-empty'
 $out = Run-Repo @("get /m/emptydir $onlyEmpty", 'exit')
-Check 'exact dir export works' ($out -match 'Created directory|Extracted 0 file\(s\)')
+Check 'exact dir export works' (Test-Path (Join-Path $onlyEmpty 'm\emptydir'))
 
 $out = Run-Repo @('rm /m', 'rm /m -r', 'exit')
 Check 'rm dir needs -r (entries)' ($out -match 'is a directory .*entries.*use rm -r')
@@ -295,9 +310,28 @@ Check 'ls shows chinese paths' ($out -match '/备份/中文目录/子目录/代�
 
 $cnOut = Join-Path $Work '中文还原'
 $out = Run-Repo @("get /备份 $cnOut", 'exit')
-$cnFile = Join-Path $cnOut '中文目录\子目录\代码.cpp'
+$cnFile = Join-Path $cnOut '备份\中文目录\子目录\代码.cpp'
 Check 'chinese round-trip' ((Test-Path $cnFile) -and
                             ((Get-Content $cnFile -Raw) -eq (Get-Content (Join-Path $cn '子目录\代码.cpp') -Raw)))
+
+Write-Host "== brow（交互式浏览 / 快速加入 / 导出）==" -ForegroundColor Cyan
+$browSrc = Join-Path $Work 'browsrc'
+New-Item -ItemType Directory -Path $browSrc -Force | Out-Null
+New-Sample (Join-Path $browSrc 'quick.bin') 5000
+$browDir = Join-Path $Work 'browrepo'
+New-Item -ItemType Directory -Path $browDir -Force | Out-Null
+$browSrcRel = '..\browsrc'
+# 注意：数组里不要写 'a' + $x（逗号优先级更高，会被拆成多个元素），用字符串插值
+$browLines = @("init -p$Pwd0", "load -p$Pwd0", 'brow', 'pwd', "lls $browSrcRel",
+               "add $browSrcRel\quick.bin", 'ls', 'cd /', 'get /quick.bin export',
+               'quit', 'ls', 'exit')
+$out = Run-Repo -NoLoad -Dir $browDir -Lines $browLines
+Check 'brow starts' ($out -match 'BlockStorage browser')
+Check 'brow prompt shows path' ($out -match 'brow:/>')
+Check 'brow lists local folder' ($out -match 'TYPE  SIZE          NAME' -and $out -match 'quick\.bin')
+Check 'brow quick add' ($out -match 'Added /quick\.bin')
+Check 'brow export keeps structure' (Test-Path (Join-Path $browDir 'export\quick.bin'))
+Check 'brow quit returns to shell' ($out -match 'BlockStorage> TYPE\s+SIZE')
 
 Write-Host "== 版本号 ==" -ForegroundColor Cyan
 $out = Run-Repo -NoLoad @('exit')

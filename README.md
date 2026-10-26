@@ -1,165 +1,156 @@
 # BlockStorage
 
-> 当前版本 **1.0.0**
+把文件/目录加密后按固定大小分块存进一个 `.block/` 仓库，再按原目录结构导出。
+索引是一棵 JSON 目录树（AES-256-GCM 加密），块与块之间的关系全部记录在 `bit` 链表里。
 
-一个用 C++17 写的**命令行加密块存储仓库**：把文件切块写入本地仓库目录 `.block/`，
-索引与数据块都以 AES-256-GCM 加密，用密码派生密钥解锁。
+- 单一索引版本（v5），不兼容旧仓库
+- 目录树存储：`ls` 可列任意目录，`-r` 递归
+- 三级存储：≤1 KiB 内联、≤256 KiB 走 4 KiB 块、更大走 256 KiB 块
+- 块号只出现在索引的 `head`/`tail`；文件内链、空闲链都在 `bit` 里，中间空洞可复用
+- 导出始终保留仓库内层级
+- 命令行提示全部为英文，路径支持中文（UTF-8）
+
+## 快速开始
 
 ```
-BlockStorage v1.0.0
-BlockStorage, made by @solitn
-Github: https://github.com/solitn/blockstorage
-Repository not found
-BlockStorage> init -pMyPassword
-...
-BlockStorage> add D:\docs\report.pdf report.pdf
-Added report.pdf (245760 bytes, 60 blocks)
-BlockStorage> ls
-NAME                             SIZE      KIND
-report.pdf                       245760    blk
-BlockStorage> get report.pdf D:\out\report.pdf
-Extracted report.pdf -> D:\out\report.pdf (245760 bytes)
+init -p<密码>             # 在当前目录创建 .block/（不带 -p 则只做混淆）
+add <文件或目录> [路径]    # 存入仓库
+ls                        # 查看
+get <内部路径> [目标]      # 导出
 ```
 
-## 功能
+示例：
 
-- **分块存储**：4 KiB 定长大块（`data.blk` + `bitmap`），小文件（≤512 B）走 `data.small` 定长槽，减少碎片
-- **加密**：索引与每个数据块都用 AES-256-GCM 独立加密，块头带随机 nonce，`tag` 校验失败即判定篡改
-- **完整性**：索引记录每个文件的 SHA-256，取回时校验
-- **子密钥隔离**：每个块用 `SHA256(master ‖ domain ‖ block_id)` 派生的独立子密钥
-- **密码派生**：PBKDF2-HMAC-SHA256，60 万次迭代，随机盐随 `.block/key` 保存
-
-## 运行
-
-直接用已编译好的 `build\BlockStorage.exe`（同目录已带 `libcrypto-3-x64.dll`），
-在**目标目录**启动即可，仓库会建在当前目录的 `.block/`：
-
-```bat
-cd /d D:\vault
-C:\path\to\blockstorage\build\BlockStorage.exe
+```
+init -pMyPass
+add D:\photos /backup/photos
+ls /backup -r
+get /backup D:\restore     ->  D:\restore\backup\photos\...
 ```
 
-需要重新编译时执行 `scripts\build.cmd`；测试执行 `powershell -ExecutionPolicy Bypass -File .\tests\test.ps1`。
-
-## 命令
-
-> 完整操作手册（含典型工作流、错误速查、FAQ）：[help.md](help.md)
+## 命令一览
 
 | 命令 | 说明 |
-|---|---|
-| `init [-p<pwd>] [-s<salt>]` | 初始化仓库；带 `-p` 用密码加密，`-s` 指定盐（默认随机） |
-| `load -p<pwd>` | 解锁仓库（每个进程启动后都要解锁） |
-| `add <src> [path] [-r]` | 加入文件或整个文件夹（保留子目录结构） |
-| `import <dir> [path]` | 完整镜像目录：所有文件 + 所有子目录（**含空目录**） |
-| `get <path> [target]` | 取出文件或整个目录树（含空目录）；省略目标则用默认导出根 |
-| `ls [path] [-r]` | 列出条目（`-r` 递归，目录带 `/` 后缀） |
-| `rm <path> [-r]` | 删除文件；目录需 `-r` |
-| `out [path]` | 查看/设置默认导出根目录 |
-| `statu` | 仓库状态、块与槽使用率、文件/目录数、导出根 |
-| `delete` | 删除整个 `.block/` 仓库 |
-| `help [command]` | 帮助（带命令名显示详细用法） |
-| `exit` / `quit` | 退出 |
+| --- | --- |
+| `init [-p<pwd>] [-s<salt>]` | 创建仓库；`-p` 用 PBKDF2-HMAC-SHA256（600000 轮）加密 |
+| `load -p<pwd>` | 解锁并解密索引（每次启动都要，免密仓库除外） |
+| `add <src> [path] [-r]` | 加文件或目录；`path` 以 `/` 结尾表示放进该目录 |
+| `import <dir> [path]` | 镜像目录（含空目录），与 `add <dir>` 等价 |
+| `brow [path]` | 交互式浏览器：浏览 / 快速加入 / 导出 |
+| `get <path> [target]` | 导出文件或整棵子树，保留原层级 |
+| `ls [path] [-r]` | 列出目录；`-r` 递归 |
+| `rm <path> [-r]` | 删除；目录需 `-r` |
+| `out [path]` | 查看/设置默认导出根（存在索引里，没有单独配置文件） |
+| `statu` | 仓库状态、块用量、文件/目录数、导出根 |
+| `delete` | 删除整个 `.block/`（不可恢复） |
+| `help [command]` | 命令列表 / 单条详细说明 |
 
-### 内部路径
+内部路径统一用 `/`，例如 `/docs/2024/a.txt`。
 
-仓库内统一用 `/` 寻址，例如 `/docs/report.pdf`。目录既可由文件路径隐式形成，
-也可由 `import` 显式建条目（因此空目录也能保存/还原）：
+## brow 浏览器
 
-```text
-import D:\photos /backup/photos  -> /backup/photos/...（含空目录）
-add D:\photos                    -> /photos/...
-add D:\a.txt /docs/              -> /docs/a.txt
-get /backup/photos D:\restore    -> D:\restore\...
+`brow` 进入交互模式，提示符形如 `brow:/docs>`，直到 `quit` 才回到主提示符。
+
+| 子命令 | 作用 |
+| --- | --- |
+| `ls [-r]` | 列出当前仓库目录 |
+| `cd <path>` / `up` | 进入目录 / 返回上级 |
+| `pwd` | 当前仓库目录 |
+| `lls [path]` / `lcd <path>` / `lpwd` | 浏览本地目录 / 切换 / 显示 |
+| `add [本地路径] [名称]` | 快速加入：默认加到当前目录，名称缺省用文件名 |
+| `get [路径] [本地目录]` | 导出，保留仓库结构 |
+| `rm <名称> [-r]` | 删除 |
+| `help` / `quit` | 帮助 / 退出 |
+
+典型流程：
+
+```
+brow                    # 从根开始
+lls D:\photos           # 看本地
+lcd D:\photos
+ls                      # 看仓库
+add 2026                # 把本地 2026 整个目录加到当前仓库目录
+get /docs D:\restore    # 导出
+quit
 ```
 
-路径支持中文（内部统一 UTF-8）。
+## 导出规则（保留结构）
 
-### 重名规则（大小写不敏感）
+- 目录/子树：`get /archive D:\restore` → `D:\restore\archive\tree\...`（`/archive` 这一层也保留）
+- 不带目标：写到默认导出根，路径同样是 `<根>/<完整内部路径>`
+- 单个文件：
+  - 目标是已存在的目录 → `<目标>/<完整内部路径>`
+  - 目标是新路径 → 就当文件名，直接写这个路径
+- 空目录同样会被创建出来
 
-- 同一路径只能存在一个条目：`/Case/File.txt` 与 `/case/file.txt`、`/CASE/FILE.TXT` 视为同一个名字，重复写入会被拒绝
-- 目标路径已被**目录**占用时，不能再当文件写入；反之亦然
-- 父目录已存在但大小写不同时，会自动沿用仓库里的写法（`/Docs` 下再写 `/docs/a.txt` → 落到 `/Docs/a.txt`）
-- `import` 采用**整批拦截**：预扫描发现任何冲突就整体中止，一条都不写（错误信息会列出前 3 处冲突）
+默认导出根的优先级：`BLOCKSTORAGE_OUT` > 索引里的 `config.output_root` > `<当前目录>\extract`。
+`out <路径>` 写的是索引里的配置，因此仓库加锁时只能看到默认值。
 
-### 默认导出根目录
-
-`get` 不带目标时写入 `<out 根>/<内部路径>`，优先级：
-
-1. 环境变量 `BLOCKSTORAGE_OUT`
-2. `.block/config.json` 的 `output_root`（由 `out <路径>` 写入）
-3. 内置默认 `<程序工作目录>\extract`（即仓库所在目录下的 `extract`）
-
-`scripts/env.ps1` 会把 `BLOCKSTORAGE_OUT` 指向仓库内 `out\extract`，方便开发测试。
-
-### 编码说明
-
-- 程序入口是 `wmain`，命令行参数按 UTF-16 接收后转 UTF-8，中文路径/文件名可直接使用
-- 控制台输出统一 UTF-8；交互输入会自动识别 UTF-8 或 GBK
-- **管道/批处理**：cmd 里请先 `chcp 65001`；PowerShell 里设 `$OutputEncoding = [Text.Encoding]::UTF8`
-  （Windows PowerShell 5.1 默认 ASCII，中文会变成 `?`）
-
-## 仓库格式
+## `.block/` 里有什么
 
 ```
 .block/
-├── key           salt(32) ‖ SHA256(派生密钥)(32)   ← 明文，用于校验密码
-├── idx           AES-256-GCM 加密的 JSON 索引（含内联小文件）
-├── data.blk      大块区：nonce(12) ‖ ct(256 KiB) ‖ tag(16) = 262172 B/块
-├── bitmap        大块分配位图（1 bit/块）
-├── data.small    小块区：nonce(12) ‖ ct(4 KiB) ‖ tag(16) = 4124 B/块
-└── bitmap.small  小块分配位图
+├── idx          索引：AES-256-GCM 加密的 JSON（目录树 + config）
+├── key          盐(32) + SHA256(派生密钥)(32)；免密仓库为空文件
+├── data.blk     256 KiB 载荷的大块区
+├── data.small   4 KiB 载荷的小块区
+└── bit          块链表：头 + 两档节点（每节点 8 字节）
 ```
 
-**三档存储**（按文件大小自动选择）：
-
-| 文件大小 | 存法 |
-|---|---|
-| ≤ 1 KiB | **内联**：内容 base64 直接写进加密索引，不占数据区 |
-| 1 KiB ~ 256 KiB | **小块**：按 4 KiB 分块写入 `data.small` |
-| > 256 KiB | **大块**：按 256 KiB 分块写入 `data.blk` |
-
-索引 JSON（解密后）：
+- 没有 `config.json`、没有位图文件，配置并入 `idx`
+- 数据记录：`nonce(12) | ciphertext | tag(16)`，每块独立随机 nonce
+- 子密钥 = `SHA256(主密钥 ‖ 域(1=大块,2=小块) ‖ 块号)`
+- 索引 JSON：
 
 ```json
 {
-  "version": 4,
-  "files": {
-    "/docs":            {"kind": "dir"},
-    "/docs/empty":      {"kind": "dir"},
-    "/docs/note.txt":   {"kind": "inline", "size": 42,      "sha256": "…", "data": "5Lit5paH"},
-    "/docs/small.bin":  {"kind": "small",  "size": 100000,  "sha256": "…", "blocks": [0,1,2]},
-    "/docs/report.pdf": {"kind": "blk",    "size": 1048576, "sha256": "…", "blocks": [0,1,2,3]}
+  "version": 5,
+  "config": { "output_root": "D:\\restore" },
+  "tree": {
+    "kind": "dir",
+    "children": {
+      "docs": { "kind": "dir", "children": {
+        "a.txt": { "kind": "inline", "size": 7, "sha256": "...", "data": "aGVsbG8=" }
+      }},
+      "big.bin": { "kind": "blk", "size": 300000, "sha256": "...", "head": 0, "tail": 1 }
+    }
   }
 }
 ```
 
-旧仓库（索引版本 ≤3）仍可读写：记录尺寸按索引版本自动切换。
+### `bit` 链表
 
-## 安全说明
+文件头 96 字节：magic、版本、节点大小、两档的容量 / 空闲数 / 链首 / 链尾；
+之后是大块节点区、小块节点区，节点按块号下标随机读写。
 
-- **无密码仓库**（`init` 不带 `-p`）使用代码内置的固定密钥，只提供混淆，**不提供机密性**，请勿存放敏感数据。
-- 密码只在 `load` 时使用；派生密钥仅驻留内存，不落盘（`.block/key` 只存盐与 SHA-256 摘要）。
-- 仓库目录 `.block/` 已加入 `.gitignore`，切勿提交。
-- 这是学习/自用性质的项目，未经安全审计。
+每个节点只有 8 字节的 `next`：
 
-## 目录结构
+- 块被占用时，`next` = 同一文件的下一个块（`-1` 表示文件末尾）
+- 块空闲时，`next` = 空闲链的下一个块（`-1` 表示链尾）
+
+分配从空闲链首取、释放追加到链尾，所以删除后留下的中间空洞会被直接复用，不要求连续。
+索引里只存每文件的 `head` / `tail`，不再存块号数组。
+
+### 分级
+
+| 大小 | 存放 |
+| --- | --- |
+| ≤ 1 KiB | 直接 base64 进索引（`kind: "inline"`） |
+| 1 KiB ~ 256 KiB | `data.small`，4 KiB 一块（`kind: "small"`） |
+| > 256 KiB | `data.blk`，256 KiB 一块（`kind: "blk"`） |
+
+## 约定与限制
+
+- 重名/冲突大小写不敏感：`Duplicate path: X conflicts with existing Y`
+- 目录可合并（同名目录视为同一个，沿用已有大小写）
+- 导入整批预检，任何冲突会整批中止，不写入半截
+- 索引版本只有 v5，旧格式仓库需要重新 `init`
+- 仓库加锁时只有 `init` / `load` / `help` / `statu`（不含统计）/ `delete` 可用
+- 中文路径、中文内容全程 UTF-8；`rm` 目录需要 `-r`
+
+## 构建与测试（可选）
 
 ```
-.
-├── CMakeLists.txt
-├── README.md              快速开始与命令参考
-├── help.md                完整操作指南（工作流 / 错误速查 / FAQ）
-├── ARCHITECTURE.md        设计说明与已知限制
-├── include/               头文件（含 nlohmann/json 单头文件）
-├── src/                   实现
-│   ├── main.cpp           wmain 入口（UTF-16 → UTF-8）+ REPL
-│   ├── command.cpp        命令表与各命令实现
-│   ├── files.cpp          内部路径 / 索引 / 分块读写 / 目录导入导出
-│   ├── store.cpp          定长记录 / 位图 / 目录管理
-│   ├── config.cpp         导出根目录配置（env / config.json / 默认）
-│   ├── utf8.cpp           UTF-8 ↔ 宽字符、管道输入编码归一化
-│   └── encrypt.cpp        PBKDF2 / AES-GCM / SHA-256 / Base64
-├── scripts/               便携工具链下载、环境、构建脚本
-├── tests/test.ps1         端到端测试（67 项断言）
-└── tools/                 便携工具链（已忽略，不入库）
+scripts\build.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test.ps1
 ```

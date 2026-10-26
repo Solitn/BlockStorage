@@ -24,6 +24,7 @@ find_package(OpenSSL REQUIRED)
 add_executable(BlockStorage
     src/main.cpp
     src/command.cpp
+    src/brow.cpp
     src/files.cpp
     src/encrypt.cpp
     src/store.cpp

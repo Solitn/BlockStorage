@@ -31,7 +31,9 @@ namespace {
 // 索引是否已解密进内存
 bool g_index_loaded = false;
 
-// 检查仓库可用并确保索引已载入
+}  // namespace
+
+// 检查仓库可用并确保索引已载入（brow 也会用到）
 Result require_loaded() {
     getStatu({});
     if (!res_statu.isfind) return {false, "Repository not found, run 'init' first"};
@@ -39,22 +41,21 @@ Result require_loaded() {
     if (!res_statu.hasload) return {false, "Repository is locked, run 'load -p<password>'"};
     if (!g_index_loaded) {
         if (!load_index(res_statu.key)) {
-            return {false, "Cannot load repository index (wrong key or corrupted data)"};
+            return {false, "Cannot load repository index (wrong key, corrupted data or old format)"};
         }
         g_index_loaded = true;
     }
     return {true, ""};
 }
 
-}  // namespace
-
 const std::map<std::string, CommandEntry> COMMANDS = {
     {"init",   {cmd_init,   "init [-p<pwd>] [-s<salt>]      create a repository (optionally encrypted)"}},
     {"load",   {cmd_load,   "load -p<pwd>                   unlock the repository"}},
     {"add",    {cmd_add,    "add <src> [path] [-r]          add a file or a folder (keeps subfolders)"}},
     {"import", {cmd_import, "import <dir> [path]            mirror a folder: files + dirs (incl. empty)"}},
-    {"get",    {cmd_get,    "get <path> [target]            extract a file, a folder or the whole repo"}},
-    {"ls",     {cmd_ls,     "ls [path] [-r]                 list entries (tree with -r)"}},
+    {"brow",   {cmd_brow,   "brow [path]                    interactive browser: browse / quick add / export"}},
+    {"get",    {cmd_get,    "get <path> [target]            extract a file or a folder (keeps structure)"}},
+    {"ls",     {cmd_ls,     "ls [path] [-r]                 list a folder (recursive with -r)"}},
     {"rm",     {cmd_rm,     "rm <path> [-r]                 remove a file, or a folder with -r"}},
     {"out",    {cmd_out,    "out [path]                     show / set the default extract root"}},
     {"statu",  {cmd_statu,  "statu                          show repository status"}},
@@ -69,7 +70,8 @@ const std::map<std::string, std::string> HELP_DETAILS = {
      "  Create a .block/ repository in the current directory.\n"
      "  -p<pwd>   encrypt with a password (PBKDF2-HMAC-SHA256, 600000 rounds)\n"
      "  -s<salt>  provide a salt (default: random 32 bytes)\n"
-     "  Without -p the repository is unencrypted: obfuscation only, no confidentiality."},
+     "  Without -p the repository is unencrypted: obfuscation only, no confidentiality.\n"
+     "  Files: idx (encrypted tree + config), key, data.blk (256 KiB), data.small (4 KiB), bit."},
     {"load",
      "load -p<pwd>\n"
      "  Verify the password and decrypt the index. Required after every start\n"
@@ -93,34 +95,50 @@ const std::map<std::string, std::string> HELP_DETAILS = {
      "  path omitted -> /<dirname>/...\n"
      "  Any duplicate or conflicting path aborts the whole import (nothing is written).\n"
      "  Example: import D:\\photos /backup/photos-2026"},
+    {"brow",
+     "brow [path]\n"
+     "  Interactive browser. Sub-commands:\n"
+     "    ls [-r]          list the current repository folder\n"
+     "    cd <path>        enter a folder (absolute or relative)\n"
+     "    up               go to the parent folder\n"
+     "    pwd              print the current repository folder\n"
+     "    lls [path]       list a local folder\n"
+     "    lcd <path>       change the local folder\n"
+     "    lpwd             print the local folder\n"
+     "    add [path] [name]  quick add from the local folder into the current folder\n"
+     "    get [path] [dir]   export a file/folder (keeps the repository structure)\n"
+     "    rm <name> [-r]   remove an entry\n"
+     "    help | quit      show this help / leave the browser\n"
+     "  Example: brow /archive"},
     {"get",
      "get <path> [target]\n"
      "  Exact file: extract that file.\n"
-     "    target omitted   -> <out root>/<internal path>\n"
-     "    target is a dir  -> <target>/<filename>\n"
+     "    target omitted   -> <out root>/<full internal path>\n"
+     "    target is a dir  -> <target>/<full internal path>  (structure preserved)\n"
      "    target is a path -> write to that path\n"
      "  Folder (exact or prefix match): export the whole subtree, including\n"
      "  empty folders and keeping the structure.\n"
-     "    target omitted   -> <out root>/<internal path>\n"
+     "    target omitted   -> <out root>/<full internal path>\n"
+     "    target given     -> <target>/<full internal path>\n"
      "  Examples: get /docs                export every file under /docs\n"
-     "            get /docs D:\\restore     export to D:\\restore/<relative path>\n"
+     "            get /docs D:\\restore     export to D:\\restore/docs/...\n"
      "            get /                    export the whole repository"},
     {"ls",
      "ls [path] [-r]\n"
      "  No arguments: list direct children of the repository root (folders end with /).\n"
-     "  With a path: list direct children of that folder.\n"
-     "  -r: list every entry recursively (folders included).\n"
-     "  Examples: ls /            ls /docs -r"},
+     "  With a path: list direct children of that folder (or the file itself).\n"
+     "  -r: list every entry recursively.\n"
+     "  Examples: ls /            ls /docs            ls /docs -r"},
     {"rm",
      "rm <path> [-r]\n"
      "  Remove a single file; folders (and everything under them) require -r.\n"
-     "  Blocks are returned to the bitmap and the index is rewritten.\n"
+     "  Blocks are returned to the bit free list and the index is rewritten.\n"
      "  Examples: rm /docs/a.txt        rm /docs -r"},
     {"out",
      "out [path]\n"
      "  No arguments: show the current default extract root and where it comes from.\n"
-     "  With a path: set it and store it in .block/config.json.\n"
-     "  Priority: BLOCKSTORAGE_OUT > .block/config.json > <cwd>\\extract\n"
+     "  With a path: set it and store it in the encrypted idx (config is merged into idx).\n"
+     "  Priority: BLOCKSTORAGE_OUT > idx config > <cwd>\\extract\n"
      "  Examples: out D:\\restore       out"},
     {"statu",
      "statu\n"
@@ -153,8 +171,8 @@ Result getStatu(const Args& args) {
     res_statu.isfind = true;
 
     res_statu.iscomplete = store::path_exists(L.index) && store::path_exists(L.key) &&
-                           store::path_exists(L.data) && store::path_exists(L.small_data) &&
-                           store::path_exists(L.bitmap) && store::path_exists(L.small_bitmap);
+                           store::path_exists(L.data) && store::path_exists(L.small) &&
+                           store::path_exists(L.bit);
 
     U8list keyfile = read_file(L.key);
     if (keyfile.size() < 64) {
@@ -219,34 +237,14 @@ Result cmd_statu(const Args& args) {
         std::cout << "key sha256 : " << Base64Encode(res_statu.key_sha256) << "\n";
     }
     if (res_statu.isfind && res_statu.iscomplete) {
-        StoreStats s = stats();
-        std::cout << "big blocks : " << s.blocks_used << " / " << s.blocks << " used (256 KiB each)\n";
-        std::cout << "small blocks: " << s.slots_used << " / " << s.slots << " used (4 KiB each)\n";
-        std::cout << "inline     : " << s.inline_files << " file(s)\n";
-        if (res_statu.hasload) {
-            if (!g_index_loaded) g_index_loaded = load_index(res_statu.key);
-            if (g_index_loaded) {
-                std::vector<ListRow> rows;
-                list_files("/", true, rows);
-                std::size_t dirs = 0;
-                std::size_t files = 0;
-                std::set<std::string> seen;
-                for (const ListRow& r : rows) {
-                    if (r.dir) {
-                        seen.insert(r.path);
-                        continue;
-                    }
-                    ++files;
-                    std::string p = r.path;
-                    std::size_t pos = 0;
-                    while ((pos = p.find('/', pos + 1)) != std::string::npos) {
-                        seen.insert(p.substr(0, pos));
-                    }
-                }
-                dirs = seen.size();
-                std::cout << "files      : " << files << "\n";
-                std::cout << "folders    : " << dirs << "\n";
-            }
+        if (!g_index_loaded) g_index_loaded = load_index(res_statu.key);
+        if (g_index_loaded) {
+            const StoreStats s = stats();
+            std::cout << "big blocks : " << s.blocks_used << " / " << s.blocks << " used (256 KiB each)\n";
+            std::cout << "small blocks: " << s.slots_used << " / " << s.slots << " used (4 KiB each)\n";
+            std::cout << "inline     : " << s.inline_files << " file(s)\n";
+            std::cout << "files      : " << s.files << "\n";
+            std::cout << "folders    : " << s.dirs << "\n";
         }
         std::cout << "out root   : " << OutputRoot() << "\n";
     }
@@ -284,7 +282,8 @@ Result cmd_help(const Args& args) {
     }
     std::cout << "\nInternal paths use '/' as separator, e.g. /docs/2024/a.txt\n"
               << "  Quick start: init -p<pwd>  ->  add <file-or-folder>  ->  ls  ->  get <path>\n"
-              << "  Full guide: see help.md in the repository root" << std::endl;
+              << "  Browse: brow  ->  ls / cd / add / get\n"
+              << "  Full guide: see README.md in the repository root" << std::endl;
     return {true, ""};
 }
 
@@ -309,13 +308,11 @@ Result cmd_load(const Args& args) {
         return {false, "Incorrect password"};
     }
 
+    if (!load_index(derived)) {
+        return {false, "Cannot decrypt repository index (wrong key, corrupted data or old format)"};
+    }
     res_statu.key = derived;
     res_statu.hasload = true;
-    if (!load_index(res_statu.key)) {
-        res_statu.key.clear();
-        res_statu.hasload = false;
-        return {false, "Cannot decrypt repository index"};
-    }
     g_index_loaded = true;
     return {true, "Loaded repository"};
 }
@@ -347,7 +344,8 @@ Result cmd_init(const Args& args) {
     if (!store::create_area(err)) return {false, err};
 
     if (!has_password && !has_salt) {
-        g_index_loaded = false;
+        load_index({});
+        g_index_loaded = true;
         return {true, "Repository initialized (no password, data is only obfuscated)"};
     }
 
@@ -377,10 +375,8 @@ Result cmd_init(const Args& args) {
     res_statu.haskey = true;
     res_statu.salt = salt_bytes;
     res_statu.key_sha256 = digest;
+    load_index(derived);
     g_index_loaded = true;
-    files = json::object();
-    files["version"] = 4;
-    files["files"] = json::object();
 
     std::cout << "salt (Base64): " << Base64Encode(salt_bytes) << std::endl;
     std::cout << "key  (Base64): " << Base64Encode(derived) << std::endl;
@@ -502,8 +498,15 @@ Result cmd_ls(const Args& args) {
     }
 
     std::vector<ListRow> rows;
-    if (!list_files(prefix, recursive, rows)) return {false, "Invalid internal path"};
-    if (rows.empty()) return {true, "Repository is empty"};
+    if (!list_files(prefix, recursive, rows)) {
+        return {false, "No such file or directory in repository: " +
+                           (prefix.empty() ? std::string("/") : prefix)};
+    }
+    if (rows.empty()) {
+        const bool root_dir = prefix.empty() || prefix == "/";
+        return {true, root_dir ? std::string("Repository is empty")
+                               : "Directory is empty: " + prefix};
+    }
 
     std::cout << "TYPE  SIZE          PATH\n";
     for (const ListRow& r : rows) {
@@ -521,17 +524,24 @@ Result cmd_ls(const Args& args) {
 
 Result cmd_out(const Args& args) {
     if (args.size() >= 2) {
+        Result pre = require_loaded();
+        if (!pre.status) return pre;
         std::string err;
         if (!SetOutputRoot(args[1], err)) {
             return {false, "Cannot set output root: " + err};
         }
+        if (!save_index(res_statu.key)) return {false, "Cannot write index"};
         return {true, "Default extract root set to " + args[1]};
     }
-    const std::string from_env = EnvOutputRoot();
-    const std::string src = !from_env.empty()
-                                ? "environment variable BLOCKSTORAGE_OUT"
-                                : (OutputRoot() == DefaultOutputRoot() ? std::string("default")
-                                                                      : std::string(".block/config.json"));
+
+    std::string src;
+    if (!EnvOutputRoot().empty()) {
+        src = "environment variable BLOCKSTORAGE_OUT";
+    } else if (!IndexOutputRoot().empty()) {
+        src = ".block/idx (config)";
+    } else {
+        src = "default";
+    }
     std::cout << "output root : " << OutputRoot() << "\n";
     std::cout << "source      : " << src << "\n";
     return {true, ""};
