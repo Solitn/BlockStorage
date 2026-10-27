@@ -5,12 +5,10 @@
 // Windows 下统一用 UTF-8 作为内部字符串编码：
 //   命令行参数（宽字符）-> UTF-8
 //   UTF-8 -> std::filesystem::path（宽字符）
+// POSIX 下路径本身就是 UTF-8 字节，不需要宽字符转换。
 #ifdef _WIN32
 std::string WideToUtf8(const std::wstring& w);
 std::wstring Utf8ToWide(const std::string& s);
-#else
-inline std::string WideToUtf8(const std::wstring& w) { return std::string(w.begin(), w.end()); }
-inline std::wstring Utf8ToWide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 #endif
 
 std::filesystem::path PathFromUtf8(const std::string& utf8);

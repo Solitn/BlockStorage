@@ -193,7 +193,7 @@ bool write_all(const fs::path& path, const U8list& data) {
 // 内部路径 -> 本地文件系统路径（root 为 UTF-8，段按 UTF-8 转宽字符）
 fs::path to_fs_path(const std::string& root, const std::string& internal) {
     fs::path p = PathFromUtf8(root);
-    for (const std::string& seg : SplitInternalPath(internal)) p /= Utf8ToWide(seg);
+    for (const std::string& seg : SplitInternalPath(internal)) p /= PathFromUtf8(seg);
     return p;
 }
 
@@ -698,7 +698,7 @@ void export_children(const std::string& ipath, const json& dir, const fs::path& 
     for (auto it = dir["children"].begin(); it != dir["children"].end(); ++it) {
         const std::string cpath = child_path(ipath, it.key());
         fs::path out = base;
-        for (const std::string& seg : SplitInternalPath(cpath)) out /= Utf8ToWide(seg);
+        for (const std::string& seg : SplitInternalPath(cpath)) out /= PathFromUtf8(seg);
 
         const json& node = it.value();
         if (is_dir_node(node)) {
@@ -754,7 +754,7 @@ Result get_file(const std::string& internal_in, const std::string& dst_in, const
             if (fs::is_directory(dst, ec)) {
                 // 目标是目录：保留仓库内的完整层级
                 out_path = dst;
-                for (const std::string& seg : SplitInternalPath(ipath)) out_path /= Utf8ToWide(seg);
+                for (const std::string& seg : SplitInternalPath(ipath)) out_path /= PathFromUtf8(seg);
             } else {
                 out_path = dst;
             }
@@ -775,7 +775,7 @@ Result get_file(const std::string& internal_in, const std::string& dst_in, const
     // 顶层目录本身也建出来（不计入 dirs）
     if (ipath != "/") {
         fs::path self = base;
-        for (const std::string& seg : SplitInternalPath(ipath)) self /= Utf8ToWide(seg);
+        for (const std::string& seg : SplitInternalPath(ipath)) self /= PathFromUtf8(seg);
         std::error_code ec;
         fs::create_directories(self, ec);
     }

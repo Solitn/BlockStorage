@@ -4,6 +4,8 @@
 #include <windows.h>
 #endif
 
+#ifdef _WIN32
+
 std::filesystem::path PathFromUtf8(const std::string& utf8) {
     return std::filesystem::path(Utf8ToWide(utf8));
 }
@@ -11,8 +13,6 @@ std::filesystem::path PathFromUtf8(const std::string& utf8) {
 std::string PathToUtf8(const std::filesystem::path& p) {
     return WideToUtf8(p.wstring());
 }
-
-#ifdef _WIN32
 
 std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -34,6 +34,34 @@ std::wstring Utf8ToWide(const std::string& s) {
     MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), need);
     return out;
 }
+
+std::string NormalizeInputEncoding(const std::string& raw) {
+    if (raw.empty() || IsValidUtf8(raw)) return raw;
+
+    // 不是合法 UTF-8：按系统 ANSI 代码页解码后转 UTF-8（兼容 GBK 管道输入）
+    const int need = MultiByteToWideChar(CP_ACP, 0, raw.data(), static_cast<int>(raw.size()),
+                                         nullptr, 0);
+    if (need <= 0) return raw;
+    std::wstring wide(static_cast<std::size_t>(need), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, raw.data(), static_cast<int>(raw.size()), wide.data(), need);
+    return WideToUtf8(wide);
+}
+
+#else  // POSIX：系统本身就是 UTF-8，路径直接用字节
+
+std::filesystem::path PathFromUtf8(const std::string& utf8) {
+    return std::filesystem::path(utf8);
+}
+
+std::string PathToUtf8(const std::filesystem::path& p) {
+    return p.u8string();
+}
+
+std::string NormalizeInputEncoding(const std::string& raw) {
+    return raw;
+}
+
+#endif
 
 bool IsValidUtf8(const std::string& s) {
     std::size_t i = 0;
@@ -57,17 +85,3 @@ bool IsValidUtf8(const std::string& s) {
     }
     return true;
 }
-
-std::string NormalizeInputEncoding(const std::string& raw) {
-    if (raw.empty() || IsValidUtf8(raw)) return raw;
-
-    // 不是合法 UTF-8：按系统 ANSI 代码页解码后转 UTF-8（兼容 GBK 管道输入）
-    const int need = MultiByteToWideChar(CP_ACP, 0, raw.data(), static_cast<int>(raw.size()),
-                                         nullptr, 0);
-    if (need <= 0) return raw;
-    std::wstring wide(static_cast<std::size_t>(need), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, raw.data(), static_cast<int>(raw.size()), wide.data(), need);
-    return WideToUtf8(wide);
-}
-
-#endif

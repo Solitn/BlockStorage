@@ -33,6 +33,16 @@ $sdkLibVer = Find-Dir $sdkLibRoot
 # ---------- CMake ----------
 $cmakeBin = Join-Path $script:Tools 'cmake\bin'
 
+# ---------- OpenSSL ----------
+# Windows 优先用本地静态构建（tools\openssl-static），否则退回随工具链下载的动态版
+$opensslStatic = Join-Path $script:Tools 'openssl-static'
+if (Test-Path (Join-Path $opensslStatic 'lib\libcrypto.lib')) {
+    $openssl = $opensslStatic
+} else {
+    $openssl = Join-Path $script:Tools 'openssl\x64'
+}
+$env:OPENSSL_ROOT_DIR = $openssl
+
 if (-not $msvc) { Write-Warning 'MSVC 未找到：先运行 python scripts\fetch_msvc.py msvc' }
 if (-not $sdkVer) { Write-Warning 'Windows SDK 未找到：先运行 python scripts\fetch_msvc.py sdk' }
 
@@ -75,5 +85,6 @@ if (-not $env:BLOCKSTORAGE_OUT) {
 
 Write-Host "MSVC    : $(if ($msvc) { $msvc.FullName } else { '<missing>' })" -ForegroundColor DarkGray
 Write-Host "SDK     : $(if ($sdkVer) { $sdkVer.FullName } else { '<missing>' })" -ForegroundColor DarkGray
+Write-Host "OpenSSL : $openssl" -ForegroundColor DarkGray
 Write-Host "CMake   : $(Join-Path $cmakeBin 'cmake.exe')" -ForegroundColor DarkGray
 Write-Host "BS out  : $env:BLOCKSTORAGE_OUT" -ForegroundColor DarkGray
